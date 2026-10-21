@@ -317,6 +317,8 @@ def build_index() -> None:
     """Embeddings and topics for meaning-based search; lives in the server so both use one model."""
     connect().close()  # applies schema.sql, so the index tables exist
     subprocess.run(["bun", "run", "index", str(DB)], cwd=ROOT / "server", check=True)
+    with closing(connect()) as conn:
+        refresh_stats(conn)  # the local stdio server reads this file directly
 
 
 # --- push -----------------------------------------------------------------

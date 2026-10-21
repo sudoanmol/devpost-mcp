@@ -144,7 +144,19 @@ The service runs from `server/Dockerfile` with a volume mounted at `/data` and t
 
 Both token files are gitignored. Keep the upload token to yourself: anyone holding it can replace the data. To revoke teammates' access, put a new token in `.team-token`, run `railway variables --set "TEAM_TOKEN=$(cat .team-token)"`, and send them the new one. `push` uploads to `https://devpost-mcp-production.up.railway.app` unless `DEVPOST_SERVER` is set.
 
-To run the server locally, start it from `server/` with `HOST=127.0.0.1 PORT=8811 DB_PATH=../data/local-server/devpost.db TEAM_TOKEN=... UPLOAD_TOKEN=... bun run dev`, load the data with `DEVPOST_SERVER=http://localhost:8811 uv run devpost push`, and connect to `http://localhost:8811/mcp`. `HOST=127.0.0.1` keeps it off your network.
+### Running it on your own machine
+
+If you run the crawler, you can skip the server: `server/src/stdio.ts` serves the same tools over stdio, straight from `data/devpost.db`. Claude starts it when it needs the tools and stops it when Claude quits, so there's nothing to keep running, no token and no push. After a `crawl`, restart Claude to see the new data.
+
+```bash
+claude mcp add --scope user devpost -- bun "$PWD/server/src/stdio.ts"
+```
+
+For Claude Desktop, add this to `claude_desktop_config.json`, using the full path to `bun` (`which bun`):
+
+```json
+"devpost": { "command": "/full/path/to/bun", "args": ["/full/path/to/devpost-mcp/server/src/stdio.ts"] }
+```
 
 ## Limits
 
