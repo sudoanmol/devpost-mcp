@@ -238,7 +238,7 @@ export async function sponsorProfile(db: D1Database, sponsor: string) {
 	// one pass over prizes, then winners through the (hackathon_id, winner) index; D1 bills every row a query reads
 	const past = await all<PrizeRow & { hackathon_id: number }>(
 		db,
-		`SELECT ${PRIZE_COLUMNS}, p.hackathon_id FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
+		`SELECT p.title, p.value, p.winners, p.description, p.entrants, p.hackathon_id FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
 		 WHERE p.title LIKE ? AND h.winners_announced = 1 ORDER BY h.ends_on DESC LIMIT 30`,
 		`%${sponsorKey(sponsor)}%`,
 	);
