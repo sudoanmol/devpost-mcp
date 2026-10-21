@@ -11,3 +11,6 @@ wheels/
 
 # Crawl database
 data/
+
+# Wrangler local state (created when wrangler runs from the repo root, e.g. during push)
+.wrangler/
