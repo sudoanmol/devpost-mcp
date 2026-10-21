@@ -1,0 +1,24 @@
+{
+  "name": "devpost-mcp-worker",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261021.1",
+    "@types/bun": "latest",
+    "wrangler": "4.149.0"
+  },
+  "peerDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "^0.29.0",
+    "zod": "^4.6.7"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}
