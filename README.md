@@ -14,7 +14,7 @@ There's no scheduled crawling. You run the update yourself when you want fresher
 You need the server URL and the team token from whoever runs the crawler. Then:
 
 ```bash
-claude mcp add --transport http --scope user devpost https://devpost-mcp.sudonamol.workers.dev/mcp --header "Authorization: Bearer <team-token>"
+claude mcp add --transport http --scope user devpost https://devpost-mcp.sudoanmol.workers.dev/mcp --header "Authorization: Bearer <team-token>"
 ```
 
 Other MCP clients take the same URL and `Authorization` header.
