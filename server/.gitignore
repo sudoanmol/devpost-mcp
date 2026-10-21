@@ -36,3 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .team-token
 .upload-token
 *.db
+
+# deployed with the server, not committed: the crawl snapshot and the embedding model
+data/
+models/
+.vercel
+.env*

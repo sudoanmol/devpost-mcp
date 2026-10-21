@@ -4,9 +4,11 @@
 // and compares by brute force. Vectors are unit length, so a dot product is the cosine similarity.
 
 import type { Database } from "bun:sqlite";
-import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
+import { env, pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
 export const MODEL = "Xenova/bge-small-en-v1.5";
+// the model lives in server/models, which deploys with the server: Vercel's filesystem is read-only, so it can't download at runtime
+env.cacheDir = Bun.fileURLToPath(new URL("../models", import.meta.url));
 export const DIMS = 384;
 // bge's instruction for short queries matched against longer passages; ideas and briefs are embedded as-is
 const QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";

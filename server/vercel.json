@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "bunVersion": "1.4.x",
+  "framework": "bun",
+  "installCommand": "bun install --production --frozen-lockfile",
+  "functions": {
+    "src/server.ts": {
+      "includeFiles": "{node_modules,models,data}/**"
+    }
+  },
+  "git": {
+    "deploymentEnabled": false
+  }
+}

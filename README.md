@@ -4,8 +4,8 @@ A shared MCP server for brainstorming hackathon ideas based on what has already 
 
 It has two parts:
 
-- **Crawler** (`src/devpost_mcp`, Python): runs on your machine, crawls Devpost (`devpost.py`) and Plume's public API (`plume.py`) into `data/devpost.db`, and uploads that SQLite file to the server. Devpost blocks requests from cloud hosts, so crawling can't happen there.
-- **MCP server** (`server/`, Bun + TypeScript): runs on Railway and answers MCP requests from the uploaded SQLite file, kept on a Railway volume. It never contacts either source, so there are no rate limits while brainstorming.
+- **Crawler** (`src/devpost_mcp`, Python): runs on your machine, crawls Devpost (`devpost.py`) and Plume's public API (`plume.py`) into `data/devpost.db`, and deploys the server with a snapshot of that SQLite file. Devpost blocks requests from cloud hosts, so crawling can't happen there.
+- **MCP server** (`server/`, Bun + TypeScript): runs on Vercel's Bun runtime and answers MCP requests from the SQLite snapshot shipped inside each deployment. It never contacts either source, so there are no rate limits while brainstorming.
 
 There's no scheduled crawling. You run the update yourself when you want fresher data.
 
@@ -18,7 +18,7 @@ Every hackathon has a `source` (`devpost` or `plume`). Plume's hackathon URLs ar
 You need the server URL and the team token from whoever runs the crawler. Then:
 
 ```bash
-claude mcp add --transport http --scope user devpost https://devpost-mcp-production.up.railway.app/mcp --header "Authorization: Bearer <team-token>"
+claude mcp add --transport http --scope user devpost https://devpost-mcp.vercel.app/mcp --header "Authorization: Bearer <team-token>"
 ```
 
 Other MCP clients take the same URL and `Authorization` header.
@@ -30,7 +30,7 @@ Other MCP clients take the same URL and `Authorization` header.
   "mcpServers": {
     "devpost": {
       "command": "npx",
-      "args": ["-y", "mcp-remote@0.14.3", "https://devpost-mcp-production.up.railway.app/mcp", "--header", "Authorization: Bearer <team-token>"]
+      "args": ["-y", "mcp-remote@0.14.3", "https://devpost-mcp.vercel.app/mcp", "--header", "Authorization: Bearer <team-token>"]
     }
   }
 }
@@ -121,28 +121,17 @@ uv run devpost crawl
 uv run devpost push
 ```
 
-`crawl` only fetches what changed on Devpost since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. Plume is small (about 40 requests), so it's refetched in full each time. `crawl` then embeds new projects and rebuilds the topics, which needs [Bun](https://bun.sh) and takes about 10 minutes the first time and about 1 minute after that. `uv run devpost index` runs just that step. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database, gzips it (about 60 MB), and uploads it. The server checks the file and swaps it in, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
+`crawl` only fetches what changed on Devpost since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. Plume is small (about 40 requests), so it's refetched in full each time. `crawl` then embeds new projects and rebuilds the topics, which needs [Bun](https://bun.sh) and takes about 10 minutes the first time and about 1 minute after that. `uv run devpost index` runs just that step. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database into `server/data/` as parts under 90 MB (Vercel refuses files over 100 MB) and runs `vercel deploy --prod`. Each instance joins the parts into `/tmp` when it starts, and Vercel switches traffic once the new deployment is ready, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
 
 Keep `data/devpost.db`, because it's what makes updates incremental. If it's lost, run the full crawl again.
 
 ## Deploying the server (maintainer)
 
-```bash
-cd server
-bun install
-bun test
-railway up
-```
+`server/` is the Vercel project `devpost-mcp`, using the Bun framework preset (`server/vercel.json`). The embedding model ships in `server/models/` so the server never downloads it; on a new machine, `bun -e 'import { embed } from "./src/embeddings"; await embed(["x"])'` in `server/` fetches it there. Both `server/data/` and `server/models/` are gitignored, so deploys run from your machine with `uv run devpost push`, not from GitHub. The GitHub repo is connected, but git-triggered deploys are off in `vercel.json`: a build from the repo alone would have no database.
 
-The service runs from `server/Dockerfile` with a volume mounted at `/data` and three variables:
+The one variable is `TEAM_TOKEN`, the bearer token teammates send to `/mcp`. Its local copy is `server/.team-token`, which is gitignored. To revoke teammates' access, put a new token in `.team-token`, replace the variable with `vercel env rm TEAM_TOKEN production` then `tr -d '\n' < .team-token | vercel env add TEAM_TOKEN production`, run `uv run devpost push`, and send them the new token.
 
-| Variable | Purpose |
-| --- | --- |
-| `TEAM_TOKEN` | Bearer token teammates send to `/mcp`; local copy in `server/.team-token` |
-| `UPLOAD_TOKEN` | Bearer token `push` sends to `/db`; local copy in `server/.upload-token` |
-| `DB_PATH` | `/data/devpost.db` |
-
-Both token files are gitignored. Keep the upload token to yourself: anyone holding it can replace the data. To revoke teammates' access, put a new token in `.team-token`, run `railway variables --set "TEAM_TOKEN=$(cat .team-token)"`, and send them the new one. `push` uploads to `https://devpost-mcp-production.up.railway.app` unless `DEVPOST_SERVER` is set.
+Cold starts take about 5 seconds, because each new instance joins the database and loads the vectors and model. Warm requests take well under a second.
 
 ### Running it on your own machine
 

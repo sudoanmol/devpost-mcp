@@ -1,0 +1,5 @@
+node_modules
+.team-token
+.upload-token
+src/*.test.ts
+.env*

@@ -1,4 +1,4 @@
-// The MCP tools, shared by the HTTP server (index.ts) and the local stdio one (stdio.ts).
+// The MCP tools, shared by the HTTP server (server.ts) and the local stdio one (stdio.ts).
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";

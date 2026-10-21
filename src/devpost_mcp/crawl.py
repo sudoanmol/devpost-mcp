@@ -2,15 +2,13 @@
 
     uv run devpost crawl      # first run takes hours; re-runs only fetch what changed
     uv run devpost index      # rebuild embeddings and topics (crawl does this at the end)
-    uv run devpost push       # upload the whole database to the server
+    uv run devpost push       # deploy the server to Vercel with a fresh database snapshot
     uv run devpost stats
 
 Every phase is resumable: stop it any time and run it again.
 """
 
 import argparse
-import gzip
-import os
 import shutil
 import subprocess
 import asyncio
@@ -18,7 +16,6 @@ import json
 import math
 import sqlite3
 import sys
-import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing
@@ -323,8 +320,8 @@ def build_index() -> None:
 
 # --- push -----------------------------------------------------------------
 
-SERVER = os.environ.get("DEVPOST_SERVER", "https://devpost-mcp-production.up.railway.app")
-UPLOAD_TOKEN = ROOT / "server" / ".upload-token"
+SERVER_DIR = ROOT / "server"
+PART_SIZE = 90_000_000  # Vercel refuses deployment files over 100 MB, so the snapshot ships in parts
 
 # what index_info reports; counted here so the server never scans whole tables
 STATS = {
@@ -346,24 +343,20 @@ def refresh_stats(conn: sqlite3.Connection) -> None:
 
 
 def push() -> None:
-    """Upload a gzipped snapshot of the whole database; the server swaps it in atomically."""
-    with tempfile.TemporaryDirectory() as tmp:
-        snapshot, packed = Path(tmp) / "devpost.db", Path(tmp) / "devpost.db.gz"
-        with closing(connect()) as conn:
-            refresh_stats(conn)
-            conn.execute("VACUUM INTO ?", (str(snapshot),))  # consistent even while a crawl is writing
-        with snapshot.open("rb") as raw, gzip.open(packed, "wb", compresslevel=6) as gz:
-            shutil.copyfileobj(raw, gz)
-        print(f"push: uploading {packed.stat().st_size / 1e6:.0f} MB to {SERVER}", flush=True)
-        with packed.open("rb") as body:
-            r = httpx.put(
-                f"{SERVER}/db",
-                content=body,
-                headers={"Authorization": f"Bearer {UPLOAD_TOKEN.read_text().strip()}", "Content-Type": "application/gzip"},
-                timeout=httpx.Timeout(30, write=None, read=300),
-            )
-    r.raise_for_status()
-    print(f"push: done, server now holds {r.json()}")
+    """Snapshot the database into the server as parts and deploy it to Vercel; the new deployment serves it."""
+    data = SERVER_DIR / "data"
+    shutil.rmtree(data, ignore_errors=True)
+    data.mkdir()
+    snapshot = data / "devpost.db"
+    with closing(connect()) as conn:
+        refresh_stats(conn)
+        conn.execute("VACUUM INTO ?", (str(snapshot),))  # consistent even while a crawl is writing
+    with snapshot.open("rb") as f:
+        for n, chunk in enumerate(iter(lambda: f.read(PART_SIZE), b"")):
+            (data / f"devpost.db.part-{n:02d}").write_bytes(chunk)
+    snapshot.unlink()
+    print(f"push: deploying {sum(p.stat().st_size for p in data.iterdir()) / 1e6:.0f} MB to Vercel", flush=True)
+    subprocess.run(["vercel", "deploy", "--prod", "--yes"], cwd=SERVER_DIR, check=True)
 
 
 def stats() -> None:
@@ -387,7 +380,7 @@ def main() -> None:
     crawl_cmd = sub.add_parser("crawl", help="fetch new and changed data from Devpost and Plume into data/devpost.db")
     crawl_cmd.add_argument("--skip-winners", action="store_true", help="skip winners' project pages (the slowest phase)")
     sub.add_parser("index", help="rebuild embeddings and topics only (crawl runs this at the end)")
-    sub.add_parser("push", help="upload the database to the MCP server")
+    sub.add_parser("push", help="deploy the MCP server to Vercel with the current database")
     sub.add_parser("stats", help="show what the local database holds")
     args = parser.parse_args()
     try:
