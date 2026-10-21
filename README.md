@@ -1,15 +1,17 @@
 # devpost-mcp
 
-A shared MCP server for brainstorming hackathon ideas based on what has already been built and what has won on Devpost. It covers every Devpost hackathon, each prize track (with the sponsor's challenge brief and criteria), every submission, and which projects won which prizes. It also includes an idea scorer.
+A shared MCP server for brainstorming hackathon ideas based on what has already been built and what has won. It covers every Devpost hackathon and HackMIT's own events from [Plume](https://plume.hackmit.org) (HackMIT and Blueprint since 2025, which aren't on Devpost), each prize track (with the sponsor's challenge brief and criteria), every submission, and which projects won which prizes. It also includes an idea scorer.
 
 It has two parts:
 
-- **Crawler** (`src/devpost_mcp`, Python): runs on your machine, crawls Devpost into `data/devpost.db`, and uploads that SQLite file to the server. Devpost blocks requests from cloud hosts, so crawling can't happen there.
-- **MCP server** (`server/`, Bun + TypeScript): runs on Railway and answers MCP requests from the uploaded SQLite file, kept on a Railway volume. It never contacts Devpost, so there are no rate limits while brainstorming.
+- **Crawler** (`src/devpost_mcp`, Python): runs on your machine, crawls Devpost (`devpost.py`) and Plume's public API (`plume.py`) into `data/devpost.db`, and uploads that SQLite file to the server. Devpost blocks requests from cloud hosts, so crawling can't happen there.
+- **MCP server** (`server/`, Bun + TypeScript): runs on Railway and answers MCP requests from the uploaded SQLite file, kept on a Railway volume. It never contacts either source, so there are no rate limits while brainstorming.
 
 There's no scheduled crawling. You run the update yourself when you want fresher data.
 
 **Scope:** hackathons that ended on or after 2024-01-01 with at least 100 registrations, plus every open and upcoming hackathon. Registrations are the only size signal Devpost exposes, and the 100 cutoff keeps student and builder events while dropping classroom-sized ones. Both thresholds are `SINCE` and `MIN_REGISTRATIONS` in `src/devpost_mcp/crawl.py`. If you change them, the next `crawl` and `push` remove whatever falls out of scope.
+
+Every hackathon has a `source` (`devpost` or `plume`). Plume's hackathon URLs are its gallery pages, such as `https://plume.hackmit.org/gallery?hackathon_id=hack-2026`. A Plume project's URL is a gallery search for its name, because Plume has no public page per project.
 
 ## Connect (teammates)
 
@@ -119,7 +121,7 @@ uv run devpost crawl
 uv run devpost push
 ```
 
-`crawl` only fetches what changed since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. It then embeds new projects and rebuilds the topics, which needs [Bun](https://bun.sh) and takes about 10 minutes the first time and about 1 minute after that. `uv run devpost index` runs just that step. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database, gzips it (about 60 MB), and uploads it. The server checks the file and swaps it in, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
+`crawl` only fetches what changed on Devpost since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. Plume is small (about 40 requests), so it's refetched in full each time. `crawl` then embeds new projects and rebuilds the topics, which needs [Bun](https://bun.sh) and takes about 10 minutes the first time and about 1 minute after that. `uv run devpost index` runs just that step. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database, gzips it (about 60 MB), and uploads it. The server checks the file and swaps it in, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
 
 Keep `data/devpost.db`, because it's what makes updates incremental. If it's lost, run the full crawl again.
 
@@ -146,8 +148,9 @@ To run the server locally, start it with `DB_PATH=../data/devpost.db TEAM_TOKEN=
 
 ## Limits
 
-- Write-ups are stored only for winners. For other projects, `get_project` returns the Devpost URL to read.
-- Entrant counts come from Devpost's per-prize opt-ins. Prizes an organizer added after judging show 0 entrants.
+- Devpost write-ups are stored only for winners. For other Devpost projects, `get_project` returns the URL to read. Plume write-ups are stored for every project.
+- Entrant counts come from each prize's opt-ins on Devpost, and from the tracks each project entered on Plume. Prizes a Devpost organizer added after judging show 0 entrants.
+- Plume has no prize briefs, prize values or tech stacks, so a Plume track's fit is matched on the sponsor's past Devpost briefs and winners. HackMIT 2025 and Blueprint 2025 list no winners on Plume, so their tracks have entrant counts but no winners.
 - Tech stacks are crawled only for winners, so embeddings and scoring use project names and taglines.
 - Topic labels are the most distinctive words, not summaries, and short taglines make topics a little noisy. The examples show what a topic actually covers.
 - The crawler scrapes HTML, so if Devpost changes its markup, the selectors in `src/devpost_mcp/devpost.py` will need updating.

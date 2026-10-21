@@ -1,7 +1,10 @@
 -- The crawl database, which the MCP server reads as-is.
+-- source says where a hackathon came from ('devpost' or 'plume'). Devpost's own ids are positive; other
+-- sources use negative ids and slugs prefixed with the source ('plume:pr-…'), so the two never collide.
 
 CREATE TABLE IF NOT EXISTS hackathons (
   id INTEGER PRIMARY KEY,
+  source TEXT NOT NULL,
   url TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL,
   organization TEXT,
@@ -35,6 +38,7 @@ CREATE INDEX IF NOT EXISTS prizes_hackathon ON prizes(hackathon_id);
 
 CREATE TABLE IF NOT EXISTS projects (
   slug TEXT PRIMARY KEY,
+  url TEXT NOT NULL,
   name TEXT NOT NULL,
   tagline TEXT,
   likes INTEGER,

@@ -35,6 +35,10 @@ test("fts queries quote every term so input can't inject syntax", () => {
 test("placements of one track collapse into one row", () => {
 	expect(trackName("[Creao AI] 2nd Place Best AI-First Disruptor")).toBe("[Creao AI] Best AI-First Disruptor");
 	expect(trackName("Best Use of Fetch.ai - 1st Place")).toBe("Best Use of Fetch.ai");
+	// Plume prizes are "<track> (<placement>)"
+	expect(trackName("OpenAI: The Fifth Teammate (Runner-Up)")).toBe("OpenAI: The Fifth Teammate");
+	expect(trackName("Givecampus: Fundraising (2nd Place + Most Production Ready)")).toBe("Givecampus: Fundraising");
+	expect(trackName("Espressif: Hardware (In AIoT) (Winner)")).toBe("Espressif: Hardware (In AIoT)");
 	const row = (title: string, entrants: number | null) => ({ title, value: "$ 500 in cash", winners: "1 winner", description: "brief", entrants });
 	const [t, ...rest] = tracks([row("[X] 1st Place Agents", 40), row("[X] 2nd Place Agents", 38), row("[X] 3rd Place Agents", null)]);
 	expect(rest).toEqual([]);

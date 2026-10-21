@@ -1,7 +1,7 @@
 [project]
 name = "devpost-mcp"
 version = "0.1.0"
-description = "Crawl Devpost hackathons, prizes, and projects into SQLite for the devpost MCP server"
+description = "Crawl Devpost and HackMIT Plume hackathons, prizes, and projects into SQLite for the devpost MCP server"
 readme = "README.md"
 authors = [
     { name = "Anmol Hurkat", email = "238388601+sudoanmol@users.noreply.github.com" }

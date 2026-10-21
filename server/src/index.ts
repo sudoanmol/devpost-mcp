@@ -17,11 +17,12 @@ const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
 
 function createServer({ database, vectors }: Loaded) {
 	const server = new McpServer(
-		{ name: "devpost", version: "4.0.0" },
+		{ name: "devpost", version: "4.1.0" },
 		{
 			instructions:
-				"An index of Devpost: every hackathon, its prize tracks (with each sponsor's challenge brief and criteria), " +
-				"all submissions, and which projects won which prizes. Typical flow: search_hackathons to find the target " +
+				"An index of hackathons from Devpost and HackMIT's Plume (HackMIT and Blueprint since 2025): every hackathon, " +
+				"its prize tracks (with each sponsor's challenge brief and criteria where the source has them), all submissions, " +
+				"and which projects won which prizes. Each hackathon says its source. Typical flow: search_hackathons to find the target " +
 				"event and past editions, get_hackathon for its tracks and judging criteria, get_winners and " +
 				"find_sponsor_winners to see what wins and how crowded each track was, find_gaps for rewarded areas few " +
 				"teams build, search_projects to check if an idea exists, score_ideas to rank drafts in one batch. Data comes from a periodic crawl; index_info says how fresh it is.",
@@ -38,7 +39,7 @@ function createServer({ database, vectors }: Loaded) {
 				query: z.string().optional().describe("words in the title or organizer"),
 				status: z.enum(["ended", "open", "upcoming"]).optional(),
 				sponsor: z.string().optional(),
-				theme: z.string().optional().describe("Devpost theme, e.g. 'Machine Learning/AI', 'Health', 'Beginner Friendly'"),
+				theme: z.string().optional().describe("e.g. Devpost's 'Machine Learning/AI', 'Health', 'Beginner Friendly', or HackMIT's 'Healthcare'"),
 				ended_after: date.optional(),
 				ended_before: date.optional(),
 				sort: z.enum(["newest", "largest"]).default("newest"),
@@ -55,7 +56,7 @@ function createServer({ database, vectors }: Loaded) {
 			description:
 				"One hackathon: description, judging criteria, and every prize track (placements collapsed) with its full brief " +
 				"(where sponsors state their own criteria), winner slots, and entrants per slot once judged.",
-			inputSchema: z.object({ url: z.string().describe("e.g. https://treehacks-2024.devpost.com") }),
+			inputSchema: z.object({ url: z.string().describe("e.g. https://treehacks-2024.devpost.com or https://plume.hackmit.org/gallery?hackathon_id=hack-2025") }),
 		},
 		async ({ url }) => {
 			const h = await db.getHackathon(database, url);
@@ -156,7 +157,7 @@ function createServer({ database, vectors }: Loaded) {
 		"get_project",
 		{
 			description: "One project: tech stack, links, every hackathon it entered and the prizes it won. Winners also include the full write-up.",
-			inputSchema: z.object({ url: z.string().describe("devpost.com/software/... URL or slug") }),
+			inputSchema: z.object({ url: z.string().describe("the project's url from any other tool, or a Devpost slug") }),
 		},
 		async ({ url }) => {
 			const p = await db.getProject(database, url);
@@ -195,7 +196,7 @@ function createServer({ database, vectors }: Loaded) {
 					.array(z.object({ title: z.string(), brief: z.string() }))
 					.max(10)
 					.default([])
-					.describe("tracks not on Devpost yet (from emails, Discord, the event site), scored like Devpost tracks"),
+					.describe("tracks not in the index yet (from emails, Discord, the event site), scored like indexed tracks"),
 				weights: z
 					.object({ novelty: z.number().min(0), proven_space: z.number().min(0), sponsor_fit: z.number().min(0) })
 					.default(DEFAULT_WEIGHTS)

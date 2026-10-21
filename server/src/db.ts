@@ -1,4 +1,4 @@
-// Read-only queries over the crawled Devpost index (schema.sql at the repo root).
+// Read-only queries over the crawled index of Devpost and Plume (schema.sql at the repo root).
 
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { embed, nearest, type VectorIndex } from "./embeddings";
@@ -7,10 +7,11 @@ type Row = Record<string, unknown>;
 
 const json = (v: unknown) => (typeof v === "string" && v ? JSON.parse(v) : v ?? null);
 
-export const projectUrl = (slug: string) => `https://devpost.com/software/${slug}`;
-
+/** The URL a hackathon is stored under, whatever page of it was pasted: a Devpost subdomain, or Plume's gallery for one event. */
 export function hackathonRoot(url: string): string {
-	return `https://${new URL(url.includes("://") ? url : `https://${url}`).host}`;
+	const u = new URL(url.includes("://") ? url : `https://${url}`);
+	if (u.host === "plume.hackmit.org") return `https://${u.host}/gallery?hackathon_id=${u.searchParams.get("hackathon_id") ?? ""}`;
+	return `https://${u.host}`;
 }
 
 export function projectSlug(urlOrSlug: string): string {
@@ -31,6 +32,7 @@ function hackathon(h: Row) {
 	return {
 		title: h.title,
 		url: h.url,
+		source: h.source,
 		organization: h.organization,
 		dates: h.dates,
 		ends_on: h.ends_on,
@@ -78,9 +80,10 @@ export async function searchHackathons(db: Database, f: HackathonFilters) {
 export type PrizeRow = { title: string; value: string | null; winners: string | null; description: string | null; entrants: number | null };
 const PRIZE_COLUMNS = "title, value, winners, description, entrants";
 
-/** "[Creao AI] 2nd Place Best AI-First Disruptor" -> "[Creao AI] Best AI-First Disruptor" */
+/** "[Creao AI] 2nd Place Best AI-First Disruptor" -> "[Creao AI] Best AI-First Disruptor"; "Education (Winner)" -> "Education" */
 export function trackName(title: string): string {
 	return title
+		.replace(/\s*\([^()]*\b(?:place|winner|runner-up|mention|prize)\b[^()]*\)\s*$/i, "")
 		.replace(/\b(?:1st|2nd|3rd|\d+th|first|second|third)\s+place\b/gi, "")
 		.replace(/\(\s*\)/g, "")
 		.replace(/\s+/g, " ")
@@ -144,7 +147,7 @@ export async function listProjects(db: Database, url: string, winnersOnly: boole
 	const root = hackathonRoot(url);
 	const rows = await all(
 		db,
-		`SELECT p.slug, p.name, p.tagline, p.likes, s.winner, s.prizes FROM submissions s
+		`SELECT p.url, p.name, p.tagline, p.likes, s.winner, s.prizes FROM submissions s
 		 JOIN hackathons h ON h.id = s.hackathon_id JOIN projects p ON p.slug = s.slug
 		 WHERE h.url = ? ${winnersOnly ? "AND s.winner = 1" : ""}
 		 ORDER BY s.winner DESC, p.likes DESC LIMIT ? OFFSET ?`,
@@ -159,7 +162,7 @@ export async function listProjects(db: Database, url: string, winnersOnly: boole
 		projects: rows.map((r) => ({
 			name: r.name,
 			tagline: r.tagline,
-			url: projectUrl(r.slug as string),
+			url: r.url,
 			winner: !!r.winner,
 			prizes: json(r.prizes),
 			likes: r.likes,
@@ -167,13 +170,13 @@ export async function listProjects(db: Database, url: string, winnersOnly: boole
 	};
 }
 
-type WinnerRow = { slug: string; name: string; tagline: string; built_with: string | null; prizes: string | null; description: string | null };
-const WINNER_COLUMNS = "p.slug, p.name, p.tagline, p.built_with, p.description, s.prizes";
+type WinnerRow = { url: string; name: string; tagline: string; built_with: string | null; prizes: string | null; description: string | null };
+const WINNER_COLUMNS = "p.url, p.name, p.tagline, p.built_with, p.description, s.prizes";
 
 const winner = (r: WinnerRow, prizes: string[] | null) => ({
 	name: r.name,
 	tagline: r.tagline,
-	url: projectUrl(r.slug),
+	url: r.url,
 	built_with: json(r.built_with),
 	prizes,
 });
@@ -290,6 +293,7 @@ export async function findSponsorWinners(db: Database, sponsor: string, endedAft
 
 export type ProjectHit = {
 	slug: string;
+	url: string;
 	name: string;
 	tagline: string;
 	likes: number;
@@ -319,13 +323,13 @@ export async function searchProjects(
 		   SELECT rowid, bm25(projects_fts, 4.0, 2.0, 1.0) AS score FROM projects_fts
 		   WHERE projects_fts MATCH ? ${eligible} ORDER BY score LIMIT 500
 		 ), x AS (
-		   SELECT p.slug, p.name, p.tagline, p.likes, p.built_with, hits.score,
+		   SELECT p.slug, p.url, p.name, p.tagline, p.likes, p.built_with, hits.score,
 		     MAX(s.winner) AS winner, MAX(h.ends_on) AS last_ended, GROUP_CONCAT(h.title, ' | ') AS hackathons
 		   FROM hits JOIN projects p ON p.rowid = hits.rowid
 		   LEFT JOIN submissions s ON s.slug = p.slug LEFT JOIN hackathons h ON h.id = s.hackathon_id
 		   GROUP BY p.slug
 		 )
-		 SELECT slug, name, tagline, likes, built_with, winner, hackathons, last_ended FROM x ORDER BY score LIMIT ?`,
+		 SELECT slug, url, name, tagline, likes, built_with, winner, hackathons, last_ended FROM x ORDER BY score LIMIT ?`,
 		...[match, ...(opts.endedAfter ? [opts.endedAfter] : []), opts.limit],
 	);
 }
@@ -335,7 +339,7 @@ export async function projectsBySlug(db: Database, slugs: string[]): Promise<Map
 	if (!slugs.length) return new Map();
 	const rows = await all<ProjectHit>(
 		db,
-		`SELECT p.slug, p.name, p.tagline, p.likes, p.built_with, MAX(s.winner) AS winner,
+		`SELECT p.slug, p.url, p.name, p.tagline, p.likes, p.built_with, MAX(s.winner) AS winner,
 		   GROUP_CONCAT(h.title, ' | ') AS hackathons, MAX(h.ends_on) AS last_ended
 		 FROM projects p LEFT JOIN submissions s ON s.slug = p.slug LEFT JOIN hackathons h ON h.id = s.hackathon_id
 		 WHERE p.slug IN (${slugs.map(() => "?").join(", ")}) GROUP BY p.slug`,
@@ -363,7 +367,7 @@ export async function searchByMeaning(
 export const projectHit = (p: ProjectHit) => ({
 	name: p.name,
 	tagline: p.tagline,
-	url: projectUrl(p.slug),
+	url: p.url,
 	winner: !!p.winner,
 	built_with: json(p.built_with),
 	likes: p.likes,
@@ -372,23 +376,23 @@ export const projectHit = (p: ProjectHit) => ({
 });
 
 export async function getProject(db: Database, urlOrSlug: string) {
-	const slug = projectSlug(urlOrSlug);
-	const [p] = await all(db, "SELECT * FROM projects WHERE slug = ?", slug);
+	// Devpost URLs end in the slug; Plume's are gallery searches, so match those whole
+	const [p] = await all(db, "SELECT * FROM projects WHERE slug = ? OR url = ?", projectSlug(urlOrSlug), urlOrSlug);
 	if (!p) return null;
 	const entries = await all(
 		db,
 		`SELECT h.title, h.url, h.dates, s.winner, s.prizes FROM submissions s JOIN hackathons h ON h.id = s.hackathon_id
 		 WHERE s.slug = ? ORDER BY h.ends_on DESC`,
-		slug,
+		p.slug,
 	);
 	return {
 		name: p.name,
 		tagline: p.tagline,
-		url: projectUrl(slug),
+		url: p.url,
 		likes: p.likes,
 		built_with: json(p.built_with),
 		links: json(p.links),
-		// only winners' write-ups are crawled; for others read the page at `url`
+		// Devpost write-ups are crawled for winners only; for others read the page at `url`
 		description: p.description ?? null,
 		submissions: entries.map((e) => ({ hackathon: e.title, url: e.url, dates: e.dates, winner: !!e.winner, prizes: json(e.prizes) })),
 	};

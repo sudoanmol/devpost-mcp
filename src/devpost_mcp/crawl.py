@@ -1,4 +1,4 @@
-"""Crawl Devpost into a local SQLite file, then upload it to the MCP server.
+"""Crawl Devpost and HackMIT's Plume into a local SQLite file, then upload it to the MCP server.
 
     uv run devpost crawl      # first run takes hours; re-runs only fetch what changed
     uv run devpost index      # rebuild embeddings and topics (crawl does this at the end)
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import httpx
 
-from . import devpost
+from . import devpost, plume
 
 ROOT = Path(__file__).resolve().parents[2]
 DB = ROOT / "data" / "devpost.db"
@@ -122,9 +122,9 @@ async def crawl_listing(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
         for h in filter(in_scope, rows):
             try:
                 conn.execute(
-                    """INSERT INTO hackathons (id, url, title, organization, dates, ends_on, status, location, themes,
+                    """INSERT INTO hackathons (id, source, url, title, organization, dates, ends_on, status, location, themes,
                          prize_total, registrations, winners_announced, updated_at)
-                       VALUES (:id, :url, :title, :organization, :dates, :ends_on, :status, :location, :themes,
+                       VALUES (:id, 'devpost', :url, :title, :organization, :dates, :ends_on, :status, :location, :themes,
                          :prize_total, :registrations, :winners_announced, :ts)
                        ON CONFLICT (id) DO UPDATE SET url = excluded.url, title = excluded.title,
                          organization = excluded.organization, dates = excluded.dates, ends_on = excluded.ends_on,
@@ -153,7 +153,7 @@ def prune(conn: sqlite3.Connection) -> None:
 async def crawl_pages(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
     todo = conn.execute(
         """SELECT h.id, h.url, h.status FROM hackathons h LEFT JOIN crawl_state s ON s.hackathon_id = h.id
-           WHERE s.page_status IS NOT h.status ORDER BY h.ends_on DESC"""
+           WHERE h.source = 'devpost' AND s.page_status IS NOT h.status ORDER BY h.ends_on DESC"""
     ).fetchall()
 
     async def work(item: object) -> None:
@@ -178,7 +178,8 @@ async def crawl_pages(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
 async def crawl_galleries(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
     todo = conn.execute(
         """SELECT h.id, h.url, h.winners_announced FROM hackathons h LEFT JOIN crawl_state s ON s.hackathon_id = h.id
-           WHERE h.status = 'ended' AND s.gallery_winners IS NOT h.winners_announced ORDER BY h.ends_on DESC"""
+           WHERE h.source = 'devpost' AND h.status = 'ended' AND s.gallery_winners IS NOT h.winners_announced
+           ORDER BY h.ends_on DESC"""
     ).fetchall()
 
     async def work(item: object) -> None:
@@ -188,7 +189,8 @@ async def crawl_galleries(c: httpx.AsyncClient, conn: sqlite3.Connection) -> Non
         with conn:
             conn.execute("UPDATE hackathons SET submissions = ?, updated_at = ? WHERE id = ?", (total, ts, hid))
             conn.executemany(
-                """INSERT INTO projects (slug, name, tagline, likes, updated_at) VALUES (:slug, :name, :tagline, :likes, :ts)
+                """INSERT INTO projects (slug, url, name, tagline, likes, updated_at)
+                   VALUES (:slug, 'https://devpost.com/software/' || :slug, :name, :tagline, :likes, :ts)
                    ON CONFLICT (slug) DO UPDATE SET name = excluded.name, tagline = excluded.tagline,
                      likes = excluded.likes, updated_at = excluded.updated_at""",
                 [p | {"ts": ts} for p in projects],
@@ -209,11 +211,11 @@ async def crawl_winners(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
         row[0]
         for row in conn.execute(
             """SELECT s.slug FROM submissions s JOIN hackathons h ON h.id = s.hackathon_id
-               WHERE s.winner = 1 AND s.slug NOT IN (SELECT slug FROM project_state)
+               WHERE h.source = 'devpost' AND s.winner = 1 AND s.slug NOT IN (SELECT slug FROM project_state)
                GROUP BY s.slug ORDER BY MAX(h.ends_on) DESC"""
         )
     ]
-    ids_by_url = dict(conn.execute("SELECT url, id FROM hackathons"))
+    ids_by_url = dict(conn.execute("SELECT url, id FROM hackathons WHERE source = 'devpost'"))
 
     async def work(item: object) -> None:
         page = await devpost.project_page(c, item)
@@ -238,7 +240,8 @@ async def crawl_entrants(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None
     """How many submissions entered each judged prize track: the competition per winner slot."""
     todo = conn.execute(
         """SELECT p.id, h.url FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
-           WHERE h.status = 'ended' AND h.winners_announced = 1 AND p.entrants IS NULL ORDER BY h.ends_on DESC"""
+           WHERE h.source = 'devpost' AND h.status = 'ended' AND h.winners_announced = 1 AND p.entrants IS NULL
+           ORDER BY h.ends_on DESC"""
     ).fetchall()
 
     async def work(item: object) -> None:
@@ -248,6 +251,42 @@ async def crawl_entrants(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None
             conn.execute("UPDATE prizes SET entrants = ?, updated_at = ? WHERE id = ?", (count, now(), prize_id))
 
     await run_all("track entrants", todo, work)
+
+
+async def crawl_plume(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
+    """HackMIT's own events, refetched in full: Plume has every track's opt-ins, so entrants come free."""
+    events = await plume.hackathons(c)
+    for h in events:
+        projects = [plume.project(p, h["tracks"]) for p in await plume.gallery(c, h["key"])]
+        ts = now()
+        with conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO hackathons (id, source, url, title, organization, dates, ends_on, status, location,
+                     themes, registrations, submissions, winners_announced, judging_criteria, updated_at)
+                   VALUES (:id, 'plume', :url, :title, 'HackMIT', :dates, :ends_on, :status, 'MIT, Cambridge, MA',
+                     :themes, :registrations, :submissions, :winners, '[]', :ts)""",
+                h | {"themes": json.dumps(h["themes"]), "winners": any(p["prizes"] for p in projects), "ts": ts},
+            )
+            conn.execute("DELETE FROM prizes WHERE hackathon_id = ?", (h["id"],))
+            conn.executemany(
+                "INSERT INTO prizes (id, hackathon_id, title, winners, entrants, updated_at) VALUES (:id, :hid, :title, :winners, :entrants, :ts)",
+                [r | {"hid": h["id"], "ts": ts} for r in plume.prizes(h, projects)],
+            )
+            conn.execute("DELETE FROM submissions WHERE hackathon_id = ?", (h["id"],))
+            for p in projects:
+                conn.execute(
+                    """INSERT INTO projects (slug, url, name, tagline, description, links, updated_at)
+                       VALUES (:slug, :url, :name, :tagline, :description, :links, :ts)
+                       ON CONFLICT (slug) DO UPDATE SET url = excluded.url, name = excluded.name, tagline = excluded.tagline,
+                         description = excluded.description, links = excluded.links, updated_at = excluded.updated_at""",
+                    p | {"links": json.dumps(p["links"]), "ts": ts},
+                )
+                conn.execute(
+                    "INSERT INTO submissions (slug, hackathon_id, winner, prizes, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (p["slug"], h["id"], bool(p["prizes"]), json.dumps(p["prizes"]) if p["prizes"] else None, ts),
+                )
+        print(f"plume: {h['title']}, {len(projects)} projects, {sum(bool(p['prizes']) for p in projects)} winners", flush=True)
+    prune(conn)
 
 
 def _set_state(conn: sqlite3.Connection, hid: int, **state: object) -> None:
@@ -265,6 +304,10 @@ async def crawl(winners: bool) -> None:
         await crawl_entrants(c, conn)
         if winners:
             await crawl_winners(c, conn)
+        try:
+            await crawl_plume(c, conn)
+        except httpx.HTTPError as e:
+            print(f"plume: skipped this run, {e!r}", file=sys.stderr)  # keeps the last good copy
     conn.close()
     build_index()
     stats()
@@ -339,7 +382,7 @@ def stats() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devpost", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    crawl_cmd = sub.add_parser("crawl", help="fetch new and changed data from Devpost into data/devpost.db")
+    crawl_cmd = sub.add_parser("crawl", help="fetch new and changed data from Devpost and Plume into data/devpost.db")
     crawl_cmd.add_argument("--skip-winners", action="store_true", help="skip winners' project pages (the slowest phase)")
     sub.add_parser("index", help="rebuild embeddings and topics only (crawl runs this at the end)")
     sub.add_parser("push", help="upload the database to the MCP server")

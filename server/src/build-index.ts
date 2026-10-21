@@ -113,7 +113,7 @@ for (let it = 0; it < ITERATIONS; it++) {
 const topicOf = Int32Array.from({ length: n }, (_, p) => closest(p));
 
 const projects = new Map(
-	(db.query("SELECT slug, name, tagline, likes FROM projects").all() as { slug: string; name: string; tagline: string | null; likes: number }[]).map(
+	(db.query("SELECT slug, url, name, tagline, likes FROM projects").all() as { slug: string; url: string; name: string; tagline: string | null; likes: number }[]).map(
 		(p) => [p.slug, p],
 	),
 );
@@ -130,7 +130,7 @@ for (const ws of projectWords) for (const w of ws) df.set(w, (df.get(w) ?? 0) + 
 const show = (p: number) => {
 	const slug = index.slugs[p]!;
 	const proj = projects.get(slug);
-	return { name: proj?.name, tagline: proj?.tagline, url: `https://devpost.com/software/${slug}`, winner: !!index.winner[p] };
+	return { name: proj?.name, tagline: proj?.tagline, url: proj?.url, winner: !!index.winner[p] };
 };
 
 db.transaction(() => {

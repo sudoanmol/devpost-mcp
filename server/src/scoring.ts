@@ -1,4 +1,4 @@
-// Score a hackathon idea against what already exists on Devpost.
+// Score a hackathon idea against what already exists in the index.
 //
 // The score covers only what past data can measure: how novel the idea is, whether projects like it
 // win more often than projects in general, and how well it fits the target hackathon's prize tracks.
@@ -57,7 +57,7 @@ async function targetTracks(db: Database, hackathonUrl: string | undefined, spon
 	const all = hackathon?.tracks ?? [];
 	const chosen = sponsors.length ? all.filter((t) => sponsors.some((sp) => matches(sp, t))) : all;
 	const listed = [
-		...chosen.map((t) => ({ ...t, source: "devpost" as const })),
+		...chosen.map((t) => ({ ...t, source: "index" as const })),
 		...extra.map((x) => ({ track: x.title, prizes: [], winner_slots: null, entrants: null, entrants_per_slot: null, challenge: x.brief, source: "user" as const })),
 	];
 	// a sponsor's past briefs and winners stand in for a brief that's empty or one line long
@@ -167,12 +167,12 @@ export async function scoreIdeas(
 			baseline_winner_rate: Math.round(baseline * 1000) / 1000,
 			weights: opts.weights,
 			interpretation: {
-				novelty: "100 = nothing close on Devpost by meaning; low = a near-duplicate exists (see closest_projects)",
+				novelty: "100 = nothing close in the index by meaning; low = a near-duplicate exists (see closest_projects)",
 				proven_space: "50 = projects like this win at the index-wide rate, 100 = at twice that or more; null = fewer than 5 similar projects, too few to say",
 				winner_lift: "similarity-weighted winner rate of the similar projects divided by baseline_winner_rate",
 				sponsor_fit: "meaning match against the best-fitting track (fit_basis says what it was matched on); null without tracks",
 				crowding: "similar_projects counts projects at similarity 0.78+ (capped at 200); biggest_cluster set means many came from one event, often a themed one",
-				competition: "entrants_per_slot is from Devpost's per-prize opt-ins; past_entrants_per_slot is the median over this sponsor's past tracks",
+				competition: "entrants_per_slot is from each prize's opt-ins on Devpost or Plume; past_entrants_per_slot is the median over this sponsor's past tracks",
 				sweet_spot: "high novelty with high proven_space: an under-built angle in a space judges reward",
 			},
 			judge_yourself:
