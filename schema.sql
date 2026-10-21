@@ -71,3 +71,19 @@ END;
 
 -- index-wide counts, refreshed by the crawler before each upload
 CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value);
+
+-- meaning-based search, written by server/src/build-index.ts
+-- version: the embedding recipe in build-index.ts; rows from an older recipe get re-embedded
+CREATE TABLE IF NOT EXISTS embeddings (slug TEXT PRIMARY KEY, vec BLOB NOT NULL, version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS topics (
+  id INTEGER PRIMARY KEY,
+  size INTEGER NOT NULL,
+  winners INTEGER NOT NULL,
+  recent INTEGER NOT NULL,
+  label TEXT,
+  centroid BLOB NOT NULL,
+  examples TEXT,
+  top_winners TEXT
+);
+CREATE TABLE IF NOT EXISTS project_topics (slug TEXT PRIMARY KEY, topic INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS project_topics_topic ON project_topics(topic);

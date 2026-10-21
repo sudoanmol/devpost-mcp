@@ -1,6 +1,7 @@
 """Crawl Devpost into a local SQLite file, then upload it to the MCP server.
 
     uv run devpost crawl      # first run takes hours; re-runs only fetch what changed
+    uv run devpost index      # rebuild embeddings and topics (crawl does this at the end)
     uv run devpost push       # upload the whole database to the server
     uv run devpost stats
 
@@ -11,6 +12,7 @@ import argparse
 import gzip
 import os
 import shutil
+import subprocess
 import asyncio
 import json
 import math
@@ -43,6 +45,7 @@ PRUNE = [
     f"DELETE FROM submissions WHERE hackathon_id IN (SELECT id FROM hackathons WHERE {OUT_OF_SCOPE});",
     f"DELETE FROM hackathons WHERE {OUT_OF_SCOPE};",
     "DELETE FROM projects WHERE slug NOT IN (SELECT slug FROM submissions);",
+    "DELETE FROM embeddings WHERE slug NOT IN (SELECT slug FROM projects);",
 ]
 
 
@@ -263,7 +266,14 @@ async def crawl(winners: bool) -> None:
         if winners:
             await crawl_winners(c, conn)
     conn.close()
+    build_index()
     stats()
+
+
+def build_index() -> None:
+    """Embeddings and topics for meaning-based search; lives in the server so both use one model."""
+    connect().close()  # applies schema.sql, so the index tables exist
+    subprocess.run(["bun", "run", "index", str(DB)], cwd=ROOT / "server", check=True)
 
 
 # --- push -----------------------------------------------------------------
@@ -278,6 +288,8 @@ STATS = {
     "prize_tracks": "SELECT COUNT(*) FROM prizes",
     "winning_entries": "SELECT COUNT(*) FROM submissions WHERE winner = 1",
     "tracks_with_entrant_counts": "SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL",
+    "projects_embedded": "SELECT COUNT(*) FROM embeddings",
+    "topics": "SELECT COUNT(*) FROM topics",
     "winner_baseline": "SELECT ROUND((SELECT COUNT(DISTINCT slug) FROM submissions WHERE winner = 1) * 1.0 / COUNT(*), 4) FROM projects",
     "last_updated": "SELECT MAX(updated_at) FROM hackathons",
 }
@@ -319,6 +331,7 @@ def stats() -> None:
             f"prizes {q('SELECT COUNT(*) FROM prizes')} (entrants counted {q('SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL')}) | projects {q('SELECT COUNT(*) FROM projects')} | "
             f"winning entries {q('SELECT COUNT(*) FROM submissions WHERE winner = 1')} "
             f"(detailed {q('SELECT COUNT(*) FROM project_state')}) | "
+            f"embedded {q('SELECT COUNT(*) FROM embeddings')}, topics {q('SELECT COUNT(*) FROM topics')} | "
             f"db {DB.stat().st_size / 1e6:.0f} MB"
         )
 
@@ -328,12 +341,15 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     crawl_cmd = sub.add_parser("crawl", help="fetch new and changed data from Devpost into data/devpost.db")
     crawl_cmd.add_argument("--skip-winners", action="store_true", help="skip winners' project pages (the slowest phase)")
+    sub.add_parser("index", help="rebuild embeddings and topics only (crawl runs this at the end)")
     sub.add_parser("push", help="upload the database to the MCP server")
     sub.add_parser("stats", help="show what the local database holds")
     args = parser.parse_args()
     try:
         if args.command == "crawl":
             asyncio.run(crawl(winners=not args.skip_winners))
+        elif args.command == "index":
+            build_index()
         elif args.command == "push":
             push()
         else:

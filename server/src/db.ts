@@ -1,6 +1,7 @@
 // Read-only queries over the crawled Devpost index (schema.sql at the repo root).
 
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { embed, nearest, type VectorIndex } from "./embeddings";
 
 type Row = Record<string, unknown>;
 
@@ -327,6 +328,36 @@ export async function searchProjects(
 		 SELECT slug, name, tagline, likes, built_with, winner, hackathons, last_ended FROM x ORDER BY score LIMIT ?`,
 		...[match, ...(opts.endedAfter ? [opts.endedAfter] : []), opts.limit],
 	);
+}
+
+/** Projects with their winner flag and hackathons, keyed by slug (order is the caller's). */
+export async function projectsBySlug(db: Database, slugs: string[]): Promise<Map<string, ProjectHit>> {
+	if (!slugs.length) return new Map();
+	const rows = await all<ProjectHit>(
+		db,
+		`SELECT p.slug, p.name, p.tagline, p.likes, p.built_with, MAX(s.winner) AS winner,
+		   GROUP_CONCAT(h.title, ' | ') AS hackathons, MAX(h.ends_on) AS last_ended
+		 FROM projects p LEFT JOIN submissions s ON s.slug = p.slug LEFT JOIN hackathons h ON h.id = s.hackathon_id
+		 WHERE p.slug IN (${slugs.map(() => "?").join(", ")}) GROUP BY p.slug`,
+		...slugs,
+	);
+	return new Map(rows.map((r) => [r.slug, r]));
+}
+
+/** Projects closest in meaning to a description of a problem, product or idea. */
+export async function searchByMeaning(
+	db: Database,
+	index: VectorIndex,
+	query: string,
+	opts: { winnersOnly: boolean; endedAfter?: string; limit: number },
+) {
+	const [q] = await embed([query], "query");
+	const hits = nearest(index, q!, opts.limit, (i) => (!opts.winnersOnly || !!index.winner[i]) && (!opts.endedAfter || (index.lastEnded[i] ?? "") >= opts.endedAfter));
+	const rows = await projectsBySlug(db, hits.map((h) => h.slug));
+	return hits.flatMap((h) => {
+		const row = rows.get(h.slug);
+		return row ? [{ ...projectHit(row), similarity: Math.round(h.sim * 100) / 100 }] : [];
+	});
 }
 
 export const projectHit = (p: ProjectHit) => ({

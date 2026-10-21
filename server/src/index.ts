@@ -4,6 +4,8 @@ import { existsSync, renameSync, rmSync } from "node:fs";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import * as db from "./db";
+import { embed, loadIndex, type VectorIndex } from "./embeddings";
+import { findGaps } from "./gaps";
 import { DEFAULT_WEIGHTS, scoreIdeas } from "./scoring";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 1) }] });
@@ -13,16 +15,16 @@ const notFound = (what: string) => fail(`${what} is not in the index. Find the r
 const limit = (max: number, fallback: number) => z.number().int().min(1).max(max).default(fallback);
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
 
-function createServer(database: Database) {
+function createServer({ database, vectors }: Loaded) {
 	const server = new McpServer(
-		{ name: "devpost", version: "3.0.0" },
+		{ name: "devpost", version: "4.0.0" },
 		{
 			instructions:
 				"An index of Devpost: every hackathon, its prize tracks (with each sponsor's challenge brief and criteria), " +
 				"all submissions, and which projects won which prizes. Typical flow: search_hackathons to find the target " +
 				"event and past editions, get_hackathon for its tracks and judging criteria, get_winners and " +
-				"find_sponsor_winners to see what wins and how crowded each track was, search_projects to check if an " +
-				"idea exists, score_ideas to rank drafts in one batch. Data comes from a periodic crawl; index_info says how fresh it is.",
+				"find_sponsor_winners to see what wins and how crowded each track was, find_gaps for rewarded areas few " +
+				"teams build, search_projects to check if an idea exists, score_ideas to rank drafts in one batch. Data comes from a periodic crawl; index_info says how fresh it is.",
 		},
 	);
 
@@ -109,20 +111,45 @@ function createServer(database: Database) {
 		"search_projects",
 		{
 			description:
-				"Full-text search over every crawled project's name, tagline and tech stack. mode all = every word must " +
-				"match; any = at least one (wider net). Results ranked by relevance.",
+				"Search every crawled project. mode meaning (default) matches by what a project does: describe the product or " +
+				"solution in plain words ('voice-controlled assistant for people working with their hands'), since the small " +
+				"model latches onto concrete nouns more than abstract situations; results carry a similarity. mode all/any are " +
+				"keyword searches over name, tagline and tech stack, for exact names like a sponsor's SDK (all = every word, any = at least one).",
 			inputSchema: z.object({
 				query: z.string(),
-				mode: z.enum(["all", "any"]).default("all"),
+				mode: z.enum(["meaning", "all", "any"]).default("meaning"),
 				winners_only: z.boolean().default(false),
 				ended_after: date.optional().describe("only projects from hackathons that ended on or after this date"),
 				limit: limit(100, 25),
 			}),
 		},
 		async ({ query, mode, winners_only, ended_after, limit }) => {
-			const hits = await db.searchProjects(database, query, { mode, winnersOnly: winners_only, endedAfter: ended_after, limit });
-			return ok({ query, returned: hits.length, projects: hits.map(db.projectHit) });
+			const opts = { winnersOnly: winners_only, endedAfter: ended_after, limit };
+			const projects =
+				mode === "meaning"
+					? await db.searchByMeaning(database, vectors, query, opts)
+					: (await db.searchProjects(database, query, { mode, ...opts })).map(db.projectHit);
+			return ok({ query, mode, returned: projects.length, projects });
 		},
+	);
+
+	server.registerTool(
+		"find_gaps",
+		{
+			description:
+				"Open spaces to brainstorm into. Every project is grouped into ~300 topics by meaning; each topic comes with " +
+				"its size, winner rate vs baseline, growth over the last year, distinctive words and example projects. " +
+				"sort underbuilt (default) = rewarded topics few teams attempt; best_odds = highest winner rate; rising = " +
+				"growing fastest; crowded = most built (to avoid). theme narrows to topics near a problem area; sponsor " +
+				"narrows to topics where that sponsor's prizes were won.",
+			inputSchema: z.object({
+				theme: z.string().optional().describe("a problem area in plain words, e.g. 'healthcare for elderly people'"),
+				sponsor: z.string().optional().describe("matched against won prize names, e.g. 'Fetch.ai'"),
+				sort: z.enum(["underbuilt", "best_odds", "rising", "crowded"]).default("underbuilt"),
+				limit: limit(30, 10),
+			}),
+		},
+		async (args) => ok(await findGaps(database, args)),
 	);
 
 	server.registerTool(
@@ -177,7 +204,7 @@ function createServer(database: Database) {
 		},
 		async ({ ideas, hackathon_url, sponsors, extra_tracks, weights }) => {
 			try {
-				return ok(await scoreIdeas(database, { ideas, hackathonUrl: hackathon_url, sponsors, extraTracks: extra_tracks, weights }));
+				return ok(await scoreIdeas(database, vectors, { ideas, hackathonUrl: hackathon_url, sponsors, extraTracks: extra_tracks, weights }));
 			} catch (e) {
 				return fail((e as Error).message);
 			}
@@ -201,8 +228,14 @@ function authorized(request: Request, token: string | undefined): boolean {
 }
 
 const DB_PATH = process.env.DB_PATH ?? "devpost.db";
-const open = () => (existsSync(DB_PATH) ? new Database(DB_PATH, { readonly: true }) : null);
+type Loaded = { database: Database; vectors: VectorIndex };
+const open = (): Loaded | null => {
+	if (!existsSync(DB_PATH)) return null;
+	const database = new Database(DB_PATH, { readonly: true });
+	return { database, vectors: loadIndex(database) };
+};
 let current = open();
+void embed(["warm up"]); // load the model now rather than on the first search
 
 const mcp = createMcpHandler(() => createServer(current!));
 
@@ -217,8 +250,10 @@ async function replaceDatabase(request: Request): Promise<Response> {
 		await file.end();
 		const check = new Database(upload, { readonly: true });
 		const stats = check.query("SELECT key, value FROM stats").all();
+		const embedded = (check.query("SELECT COUNT(*) AS n FROM embeddings").get() as { n: number }).n;
 		check.close();
 		if (!stats.length) throw new Error("stats table is empty");
+		if (!embedded) throw new Error("no embeddings; run `uv run devpost crawl` so it builds them");
 	} catch (e) {
 		rmSync(upload, { force: true });
 		return new Response(`Rejected upload: ${(e as Error).message}`, { status: 400 });
@@ -227,8 +262,8 @@ async function replaceDatabase(request: Request): Promise<Response> {
 	renameSync(upload, DB_PATH);
 	const previous = current;
 	current = open();
-	previous?.close();
-	return Response.json(await db.indexInfo(current!));
+	previous?.database.close();
+	return Response.json(await db.indexInfo(current!.database));
 }
 
 const unauthorized = () => new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Bearer" } });

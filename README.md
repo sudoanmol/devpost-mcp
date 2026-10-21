@@ -45,7 +45,8 @@ This needs Node.js. If you installed Node with nvm or another version manager, t
 | `list_hackathon_projects` | One hackathon's submissions, winners first |
 | `get_winners` | A hackathon's winners and the prizes they won; with `sponsor`, grouped by that sponsor's tracks with each track's brief and how each winner used the sponsor |
 | `find_sponsor_winners` | One sponsor's tracks across hackathons, newest first: each event's brief, entrants per winner slot, and the winners of that exact track |
-| `search_projects` | Full-text search over every project's name, tagline, and tech stack, optionally winners-only or recent-only |
+| `search_projects` | Search every project by meaning (describe a problem in plain words) or by keyword, optionally winners-only or recent-only |
+| `find_gaps` | Topics where winners are common but few teams build, topics that are growing, and topics that are crowded |
 | `get_project` | Tech stack, links, hackathons entered, and prizes won; winners also include their full write-up |
 | `score_ideas` | Ranks up to 10 draft ideas by novelty, winning track record, and prize-track fit, with the closest existing projects as evidence |
 | `index_info` | How much the index holds and when it was last updated |
@@ -64,13 +65,28 @@ Sponsors show up on Devpost as prize tracks, usually named like `Fetch.ai: Smart
 
 When the brief states a cash amount different from Devpost's listed value, the prize includes `cash_in_brief`. Organizers sometimes put perks into the listed value.
 
+### Search by meaning
+
+Every project's name and tagline is embedded with [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), a small open model that runs inside both the crawler and the server, so there are no API keys or per-query costs. `search_projects` defaults to `mode="meaning"`, which finds projects by what they do, even when they share no words with the query: "regulated paperwork for small businesses" finds regulatory-report drafting and policy-tracking tools. Describe the product rather than the situation. The model is small and latches onto concrete nouns, so "voice-controlled assistant for people working with their hands" works better than "jobs where people's hands are busy". `mode="all"` and `mode="any"` are keyword searches, better for exact names such as a sponsor's SDK.
+
+### Finding gaps
+
+The crawler also groups all projects into about 300 topics by meaning. `find_gaps` returns, for each topic, how many projects it has, how often they win compared with the baseline, how fast it grew over the last year, its most distinctive words, and example projects and winners. Sort by:
+
+- `underbuilt` (default): topics winning at 1.2x the baseline or better, smallest first. These are rewarded spaces few teams attempt.
+- `best_odds`: highest winner rate.
+- `rising`: growing fastest.
+- `crowded`: most built, to know what to avoid.
+
+`theme="healthcare for elderly people"` narrows to topics near a problem area. `sponsor="Fetch.ai"` narrows to topics where that sponsor's prizes were won. Topics under 20 projects get no winner rate, since a handful of projects can't support one.
+
 ### Idea scoring
 
 `score_ideas` scores up to 10 ideas in one call and returns them ranked. The hackathon's judging criteria and track briefs come back once for the whole batch, under `context`. It scores only what past data can measure:
 
-- `novelty` (default weight 0.5): distance from the closest projects. One near-twin lowers it; several lower it more.
-- `proven_space` (0.3): how often projects similar to the idea won, compared with how often indexed projects win overall. 50 means they win at the usual rate, and 100 means twice that or more. This is `winner_lift`. It's null when fewer than 5 projects are similar enough to count.
-- `sponsor_fit` (0.2): match against the best-fitting prize track. When a track's brief is empty or a single line, the match uses that sponsor's past briefs and winners instead (see `fit_basis`).
+- `novelty` (default weight 0.5): distance in meaning from the closest projects. One near-twin lowers it; several lower it more.
+- `proven_space` (0.3): how often projects similar to the idea won, compared with how often indexed projects win overall. 50 means they win at the usual rate, and 100 means twice that or more. This is `winner_lift`. It's null when fewer than 5 projects are similar enough to count (similarity 0.78 or more).
+- `sponsor_fit` (0.2): match in meaning against the best-fitting prize track. When a track's brief is empty or a single line, the match uses that sponsor's past briefs and winners instead (see `fit_basis`).
 
 These combine into `signal_score`. Pass `weights` to change the mix, for example to favour sponsor fit when prize money matters most. The best ideas usually have high novelty and high `proven_space`: an angle nobody has built yet, in a space judges reward.
 
@@ -84,15 +100,16 @@ Options:
 
 Feasibility, demo quality and impact are left to the agent, which rates them against the briefs and the judging criteria.
 
-The similarity is lexical TF-IDF, so it misses paraphrases ("ASL" vs "sign language"). Passing 2-4 `queries` per idea with different wordings makes up for most of that.
+Similarity is by meaning, so rewordings match ("ASL glove" and "sign language translator"). Each idea's optional `queries` add keyword searches on top, which help with exact names the model may blur, such as a sponsor's SDK.
 
 ## Suggested agent workflow
 
 1. `search_hackathons(query="<target>")` to find the upcoming event and its past editions.
 2. `get_hackathon(<upcoming>)` to read its prize tracks and judging criteria.
 3. `get_winners(<past edition>)` and `find_sponsor_winners(<sponsor>)` to see what has won and what each sponsor rewards.
-4. Brainstorm, then run `score_ideas(ideas=[...], hackathon_url=<upcoming>, sponsors=[<targeted sponsors>])` on the drafts together. Drop the near-duplicates and refine the rest.
-5. `get_project(<closest match>)` to see how the nearest existing project did it, and find a different angle.
+4. `find_gaps(theme=..., sponsor=...)` to find rewarded areas few teams have built, and `search_projects` to look around them.
+5. Brainstorm, then run `score_ideas(ideas=[...], hackathon_url=<upcoming>, sponsors=[<targeted sponsors>])` on the drafts together. Drop the near-duplicates and refine the rest.
+6. `get_project(<closest match>)` to see how the nearest existing project did it, and find a different angle.
 
 ## Updating the data (maintainer)
 
@@ -102,7 +119,7 @@ uv run devpost crawl
 uv run devpost push
 ```
 
-`crawl` only fetches what changed since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database, gzips it (about 60 MB), and uploads it. The server checks the file and swaps it in, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
+`crawl` only fetches what changed since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. It then embeds new projects and rebuilds the topics, which needs [Bun](https://bun.sh) and takes about 10 minutes the first time and about 1 minute after that. `uv run devpost index` runs just that step. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database, gzips it (about 60 MB), and uploads it. The server checks the file and swaps it in, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
 
 Keep `data/devpost.db`, because it's what makes updates incremental. If it's lost, run the full crawl again.
 
@@ -131,5 +148,6 @@ To run the server locally, start it with `DB_PATH=../data/devpost.db TEAM_TOKEN=
 
 - Write-ups are stored only for winners. For other projects, `get_project` returns the Devpost URL to read.
 - Entrant counts come from Devpost's per-prize opt-ins. Prizes an organizer added after judging show 0 entrants.
-- Tech stacks are crawled only for winners, so scoring compares ideas on project names and taglines.
+- Tech stacks are crawled only for winners, so embeddings and scoring use project names and taglines.
+- Topic labels are the most distinctive words, not summaries, and short taglines make topics a little noisy. The examples show what a topic actually covers.
 - The crawler scrapes HTML, so if Devpost changes its markup, the selectors in `src/devpost_mcp/devpost.py` will need updating.

@@ -1,21 +1,29 @@
 import { expect, test } from "bun:test";
 import { cashInBrief, ftsQuery, mentions, sponsorKey, titleSponsor, trackName, tracks } from "./db";
-import { cosine, scaled, tfidf, tokens, winnerLift } from "./scoring";
-
-test("similar ideas score closer than unrelated ones", () => {
-	const [a, b, c] = tfidf([tokens("sign language translator glove"), tokens("ASL sign language glove translator"), tokens("crypto wallet for pets")]);
-	expect(cosine(a!, b!)).toBeGreaterThan(0.5);
-	expect(cosine(a!, c!)).toBeLessThan(0.5);
-});
+import { DIMS, nearest, quantize, type VectorIndex } from "./embeddings";
+import { scaled, tokens, winnerLift } from "./scoring";
 
 test("tokens split hyphens, keep tech names, singularize plain words only", () => {
 	expect(tokens("The robots using OpenCV")).toEqual(["robot", "opencv"]);
 	expect(tokens("LLM-driven next.js class")).toEqual(["llm", "driven", "next.js", "class"]);
+	expect(tokens("autonomous analysis agents")).toEqual(["autonomous", "analysis", "agent"]);
 });
 
-test("scaled clamps to 0..100", () => {
-	expect(scaled(0.9, 0.3)).toBe(100);
-	expect(scaled(0, 0.3)).toBe(0);
+test("scaled maps [zeroAt, fullAt] onto 0..100 and clamps", () => {
+	expect(scaled(0.75, 0.6, 0.9)).toBe(50);
+	expect(scaled(0.95, 0.6, 0.9)).toBe(100);
+	expect(scaled(0.3, 0.6, 0.9)).toBe(0);
+});
+
+test("nearest ranks by similarity and honours the filter", () => {
+	const unit = (d: number) => Float32Array.from({ length: DIMS }, (_, i) => (i === d ? 1 : 0));
+	const mixed = Float32Array.from({ length: DIMS }, (_, i) => (i < 2 ? Math.SQRT1_2 : 0));
+	const vecs = [unit(0), mixed, unit(1)];
+	const vectors = new Int8Array(vecs.length * DIMS);
+	vecs.forEach((v, i) => vectors.set(quantize(v), i * DIMS));
+	const index: VectorIndex = { slugs: ["a", "b", "c"], vectors, winner: Uint8Array.from([0, 1, 0]), lastEnded: [null, null, null], position: new Map() };
+	expect(nearest(index, unit(0), 2).map((h) => h.slug)).toEqual(["a", "b"]);
+	expect(nearest(index, unit(0), 3, (i) => !!index.winner[i]).map((h) => h.slug)).toEqual(["b"]);
 });
 
 test("fts queries quote every term so input can't inject syntax", () => {
