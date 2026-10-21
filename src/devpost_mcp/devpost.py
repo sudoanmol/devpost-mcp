@@ -18,7 +18,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (devpost-mcp)", "Accept-Language": "en"}
 
 # ponytail: in-process cache, lives as long as the MCP server; move to disk if restarts get slow
 _cache: dict[str, str] = {}
-_limit = asyncio.Semaphore(6)  # stay polite to Devpost
+_limit = asyncio.Semaphore(4)  # stay polite to Devpost
 _client: httpx.AsyncClient | None = None
 
 
@@ -32,8 +32,12 @@ def _http() -> httpx.AsyncClient:
 async def _get(url: str, params: dict | list | None = None, as_json: bool = False) -> str:
     key = str(httpx.URL(url, params=params))
     if key not in _cache:
-        async with _limit:
-            r = await _http().get(key, headers={"Accept": "application/json"} if as_json else None)
+        for attempt in range(5):
+            async with _limit:
+                r = await _http().get(key, headers={"Accept": "application/json"} if as_json else None)
+            if r.status_code != 429:
+                break
+            await asyncio.sleep(float(r.headers.get("Retry-After", 2**attempt)))
         r.raise_for_status()
         _cache[key] = r.text
     return _cache[key]
@@ -167,11 +171,11 @@ async def get_prizes(url: str) -> list[dict]:
     ]
 
 
-async def search_projects(query: str, winners_only: bool = False, pages: int = 4) -> dict:
+async def search_projects(query: str, winners_only: bool = False, pages: int = 4, sort: str = "popular") -> dict:
     """Devpost's search returns 6 results per page; pages are fetched in parallel."""
-    pages = max(1, min(pages, 10))
+    pages = 10 if winners_only else max(1, min(pages, 10))
     results = await asyncio.gather(
-        *(_get(f"{BASE}/software/search", {"query": query, "page": p}, as_json=True) for p in range(1, pages + 1))
+        *(_get(f"{BASE}/software/search", {"query": query, "page": p} | ({"order_by": "popular"} if sort == "popular" else {}), as_json=True) for p in range(1, pages + 1))
     )
     pages_data = [json.loads(r) for r in results]
     projects = [
@@ -187,7 +191,7 @@ async def search_projects(query: str, winners_only: bool = False, pages: int = 4
         for s in d["software"]
         if s["winner"] or not winners_only
     ]
-    return {"query": query, "total_matches": pages_data[0]["total_count"], "returned": len(projects), "projects": projects}
+    return {"query": query, "sort": sort, "total_matches": pages_data[0]["total_count"], "returned": len(projects), "projects": projects}
 
 
 async def get_project(url: str) -> dict:

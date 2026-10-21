@@ -46,9 +46,9 @@ async def list_hackathon_projects(
 
 
 @mcp.tool()
-async def get_prizes(url: str) -> list[dict]:
+async def get_prizes(url: str) -> dict:
     """A hackathon's prize tracks with ids usable as list_hackathon_projects(prize_id=...)."""
-    return await devpost.get_prizes(url)
+    return {"prizes": await devpost.get_prizes(url)}
 
 
 @mcp.tool()
@@ -76,9 +76,14 @@ async def find_sponsor_winners(
 
 
 @mcp.tool()
-async def search_projects(query: str, winners_only: bool = False, pages: int = 4) -> dict:
-    """Keyword search across every project on Devpost (6 results per page, max 10 pages)."""
-    return await devpost.search_projects(query, winners_only, pages)
+async def search_projects(query: str, winners_only: bool = False, pages: int = 4, sort: str = "popular") -> dict:
+    """Keyword search across every project on Devpost (6 results per page, max 10 pages).
+
+    sort: "popular" (most liked; ~1 in 3 is a winner) or "newest" (latest trends, mostly unjudged).
+    winners_only always scans the full 10 pages. For winners of a known event prefer get_winners; for a
+    sponsor prefer find_sponsor_winners.
+    """
+    return await devpost.search_projects(query, winners_only, pages, sort)
 
 
 @mcp.tool()

@@ -1,7 +1,7 @@
 [project]
 name = "devpost-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server for live Devpost hackathon data, sponsor prize search, and idea scoring"
 readme = "README.md"
 authors = [
     { name = "Anmol Hurkat", email = "238388601+sudoanmol@users.noreply.github.com" }
