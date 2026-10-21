@@ -197,12 +197,18 @@ export async function searchProjects(
 ): Promise<ProjectHit[]> {
 	const match = ftsQuery(query, opts.mode);
 	if (!match) return [];
-	const filters = [opts.winnersOnly ? "x.winner = 1" : "", opts.endedAfter ? "x.last_ended >= ?" : ""].filter(Boolean);
+	// filters go inside the ranked shortlist so a broad query can't push every winner past the cutoff
+	const conditions = [opts.winnersOnly ? "s.winner = 1" : "", opts.endedAfter ? "h.ends_on >= ?" : ""].filter(Boolean);
+	const eligible = conditions.length
+		? `AND rowid IN (SELECT p.rowid FROM projects p JOIN submissions s ON s.slug = p.slug JOIN hackathons h ON h.id = s.hackathon_id
+		   WHERE ${conditions.join(" AND ")})`
+		: "";
 	// rank first inside FTS, then attach winner flags and hackathon names to that shortlist
 	return all<ProjectHit>(
 		db,
 		`WITH hits AS (
-		   SELECT rowid, bm25(projects_fts, 4.0, 2.0, 1.0) AS score FROM projects_fts WHERE projects_fts MATCH ? ORDER BY score LIMIT 500
+		   SELECT rowid, bm25(projects_fts, 4.0, 2.0, 1.0) AS score FROM projects_fts
+		   WHERE projects_fts MATCH ? ${eligible} ORDER BY score LIMIT 500
 		 ), x AS (
 		   SELECT p.slug, p.name, p.tagline, p.likes, p.built_with, hits.score,
 		     MAX(s.winner) AS winner, MAX(h.ends_on) AS last_ended, GROUP_CONCAT(h.title, ' | ') AS hackathons
@@ -210,8 +216,7 @@ export async function searchProjects(
 		   LEFT JOIN submissions s ON s.slug = p.slug LEFT JOIN hackathons h ON h.id = s.hackathon_id
 		   GROUP BY p.slug
 		 )
-		 SELECT slug, name, tagline, likes, built_with, winner, hackathons FROM x
-		 ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY score LIMIT ?`,
+		 SELECT slug, name, tagline, likes, built_with, winner, hackathons FROM x ORDER BY score LIMIT ?`,
 		...[match, ...(opts.endedAfter ? [opts.endedAfter] : []), opts.limit],
 	);
 }
