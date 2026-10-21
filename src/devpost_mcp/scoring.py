@@ -100,6 +100,7 @@ async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url:
             "note": "Rate feasibility in the time limit, demo-ability, and impact against these criteria; past data can't.",
         },
         "queries_used": queries,
+        "rate_limited": any(s["rate_limited"] for s in searches),
     }
 
 
