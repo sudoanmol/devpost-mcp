@@ -1,22 +1,24 @@
-"""Crawl Devpost into a local SQLite file, then push what changed to D1.
+"""Crawl Devpost into a local SQLite file, then upload it to the MCP server.
 
     uv run devpost crawl      # first run takes hours; re-runs only fetch what changed
-    uv run devpost push       # upload rows changed since the last push to D1
+    uv run devpost push       # upload the whole database to the server
     uv run devpost stats
 
 Every phase is resumable: stop it any time and run it again.
 """
 
 import argparse
+import gzip
+import os
+import shutil
 import asyncio
 import json
 import math
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,7 +28,6 @@ from . import devpost
 
 ROOT = Path(__file__).resolve().parents[2]
 DB = ROOT / "data" / "devpost.db"
-WRANGLER_CONFIG = ROOT / "worker" / "wrangler.jsonc"
 CONCURRENCY = 8  # ~10 req/s, which Devpost served without a single error in testing
 
 # Scope: judged hackathons from the AI era that drew a real crowd (registrations is the only size signal
@@ -35,7 +36,7 @@ CONCURRENCY = 8  # ~10 req/s, which Devpost served without a single error in tes
 SINCE = "2024-01-01"
 MIN_REGISTRATIONS = 100
 OUT_OF_SCOPE = f"status = 'ended' AND (ends_on IS NULL OR ends_on < '{SINCE}' OR registrations < {MIN_REGISTRATIONS})"
-# runs locally after the listing and in D1 on every push, so both drop the same rows
+# runs after every listing, so the uploaded database never holds out-of-scope rows
 PRUNE = [
     f"DELETE FROM prizes WHERE hackathon_id IN (SELECT id FROM hackathons WHERE {OUT_OF_SCOPE});",
     f"DELETE FROM submissions WHERE hackathon_id IN (SELECT id FROM hackathons WHERE {OUT_OF_SCOPE});",
@@ -51,7 +52,6 @@ def in_scope(h: dict) -> bool:
 LOCAL_STATE = """
 CREATE TABLE IF NOT EXISTS crawl_state (hackathon_id INTEGER PRIMARY KEY, page_status TEXT, gallery_winners INTEGER);
 CREATE TABLE IF NOT EXISTS project_state (slug TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 
@@ -266,52 +266,10 @@ async def crawl(winners: bool) -> None:
 
 # --- push -----------------------------------------------------------------
 
-COLUMNS = {
-    "hackathons": ["id", "url", "title", "organization", "dates", "ends_on", "status", "location", "themes", "prize_total",
-                   "registrations", "winners_announced", "submissions", "tagline", "description", "judging_criteria", "updated_at"],
-    "prizes": ["id", "hackathon_id", "title", "value", "winners", "description", "entrants", "updated_at"],
-    "projects": ["slug", "name", "tagline", "likes", "built_with", "description", "links", "updated_at"],
-    "submissions": ["slug", "hackathon_id", "winner", "prizes", "updated_at"],
-}
-KEYS = {"hackathons": ["id"], "prizes": ["id"], "projects": ["slug"], "submissions": ["slug", "hackathon_id"]}
-STATEMENTS_PER_FILE = 20_000
+SERVER = os.environ.get("DEVPOST_SERVER", "https://devpost-mcp-production.up.railway.app")
+UPLOAD_TOKEN = ROOT / "server" / ".upload-token"
 
-
-def sql_literal(v: object) -> str:
-    if v is None:
-        return "NULL"
-    if isinstance(v, (int, float)):
-        return str(v)
-    return "'" + str(v).replace("'", "''") + "'"
-
-
-def upsert(table: str, row: tuple) -> str:
-    cols = COLUMNS[table]
-    updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c not in KEYS[table])
-    values = ", ".join(sql_literal(v) for v in row)
-    return f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({values}) ON CONFLICT ({', '.join(KEYS[table])}) DO UPDATE SET {updates};"
-
-
-def changed_statements(conn: sqlite3.Connection, since: str) -> Iterable[str]:
-    yield from PRUNE
-    for table in ("hackathons", "projects", "submissions"):
-        for row in conn.execute(f"SELECT {', '.join(COLUMNS[table])} FROM {table} WHERE updated_at > ?", (since,)):
-            yield upsert(table, row)
-    # a refreshed hackathon page replaces its whole prize list, so mirror that
-    for (hid,) in conn.execute("SELECT id FROM hackathons WHERE updated_at > ?", (since,)):
-        yield f"DELETE FROM prizes WHERE hackathon_id = {hid};"
-        for row in conn.execute(f"SELECT {', '.join(COLUMNS['prizes'])} FROM prizes WHERE hackathon_id = ?", (hid,)):
-            yield upsert("prizes", row)
-    # entrant counts update single prizes without touching their hackathon
-    for row in conn.execute(
-        f"""SELECT {', '.join(COLUMNS['prizes'])} FROM prizes WHERE updated_at > ?
-            AND hackathon_id IN (SELECT id FROM hackathons WHERE updated_at <= ?)""",
-        (since, since),
-    ):
-        yield upsert("prizes", row)
-
-
-# what index_info reports; counted here so the Worker never scans whole tables (D1 bills every row read)
+# what index_info reports; counted here so the server never scans whole tables
 STATS = {
     "hackathons": "SELECT COUNT(*) FROM hackathons",
     "projects": "SELECT COUNT(*) FROM projects",
@@ -323,42 +281,30 @@ STATS = {
 }
 
 
-def stats_statements(conn: sqlite3.Connection) -> list[str]:
-    return [f"INSERT OR REPLACE INTO stats (key, value) VALUES ('{k}', {sql_literal(conn.execute(q).fetchone()[0])});" for k, q in STATS.items()]
-
-
-def wrangler(*args: str) -> None:
-    subprocess.run(["wrangler", "d1", "execute", "DB", "--remote", "--yes", "--config", str(WRANGLER_CONFIG), *args], check=True)
+def refresh_stats(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.executemany("INSERT OR REPLACE INTO stats (key, value) VALUES (?, ?)", [(k, conn.execute(q).fetchone()[0]) for k, q in STATS.items()])
 
 
 def push() -> None:
+    """Upload a gzipped snapshot of the whole database; the server swaps it in atomically."""
     conn = connect()
-    since = (conn.execute("SELECT value FROM meta WHERE key = 'pushed_at'").fetchone() or [""])[0]
-    started = now()
-    wrangler("--file", str(ROOT / "schema.sql"))  # all IF NOT EXISTS, so it only adds what's new
-    batch: list[str] = []
-    sent = 0
-
-    def flush() -> None:
-        nonlocal sent
-        with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as f:
-            f.write("\n".join(batch))
-        wrangler("--file", f.name)
-        Path(f.name).unlink()
-        sent += len(batch)
-        print(f"push: {sent} statements sent", flush=True)
-        batch.clear()
-
-    for statement in [*changed_statements(conn, since), *stats_statements(conn)]:
-        batch.append(statement)
-        if len(batch) >= STATEMENTS_PER_FILE:
-            flush()
-    if batch:
-        flush()
-    # only after every batch landed, so a failed push simply resends next time (upserts are idempotent)
-    with conn:
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('pushed_at', ?)", (started,))
-    print(f"push: done, {sent} statements" if sent else "push: D1 already up to date")
+    refresh_stats(conn)
+    with tempfile.TemporaryDirectory() as tmp:
+        snapshot, packed = Path(tmp) / "devpost.db", Path(tmp) / "devpost.db.gz"
+        conn.execute("VACUUM INTO ?", (str(snapshot),))  # consistent even while a crawl is writing
+        with snapshot.open("rb") as raw, gzip.open(packed, "wb", compresslevel=6) as gz:
+            shutil.copyfileobj(raw, gz)
+        print(f"push: uploading {packed.stat().st_size / 1e6:.0f} MB to {SERVER}", flush=True)
+        with packed.open("rb") as body:
+            r = httpx.put(
+                f"{SERVER}/db",
+                content=body,
+                headers={"Authorization": f"Bearer {UPLOAD_TOKEN.read_text().strip()}", "Content-Type": "application/gzip"},
+                timeout=httpx.Timeout(30, write=None, read=300),
+            )
+    r.raise_for_status()
+    print(f"push: done, server now holds {r.json()}")
 
 
 def stats(conn: sqlite3.Connection | None = None) -> None:
@@ -380,7 +326,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     crawl_cmd = sub.add_parser("crawl", help="fetch new and changed data from Devpost into data/devpost.db")
     crawl_cmd.add_argument("--skip-winners", action="store_true", help="skip winners' project pages (the slowest phase)")
-    sub.add_parser("push", help="upload changes to D1")
+    sub.add_parser("push", help="upload the database to the MCP server")
     sub.add_parser("stats", help="show what the local database holds")
     args = parser.parse_args()
     try:
@@ -395,8 +341,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    assert sql_literal("it's") == "'it''s'" and sql_literal(None) == "NULL" and sql_literal(3) == "3"
-    assert upsert("submissions", ("a", 1, 1, None, "t")).startswith("INSERT INTO submissions (slug, hackathon_id, winner, prizes, updated_at) VALUES ('a', 1, 1, NULL, 't') ON CONFLICT (slug, hackathon_id) DO UPDATE SET winner = excluded.winner")
     assert in_scope({"status": "ended", "ends_on": "2024-03-01", "registrations": 100})
     assert not in_scope({"status": "ended", "ends_on": "2023-12-31", "registrations": 5000})
     assert not in_scope({"status": "ended", "ends_on": "2025-01-01", "registrations": 99})

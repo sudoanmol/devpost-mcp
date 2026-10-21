@@ -4,19 +4,19 @@ A shared MCP server for brainstorming hackathon ideas based on what has already 
 
 It has two parts:
 
-- **Crawler** (`src/devpost_mcp`, Python): runs on your machine, crawls Devpost into `data/devpost.db`, and pushes changes to Cloudflare D1. Devpost returns 403 to Cloudflare Workers, so crawling can't happen in the cloud.
-- **MCP server** (`worker/`, TypeScript): a Cloudflare Worker that answers MCP requests from D1. It never contacts Devpost, so there are no rate limits while brainstorming.
+- **Crawler** (`src/devpost_mcp`, Python): runs on your machine, crawls Devpost into `data/devpost.db`, and uploads that SQLite file to the server. Devpost blocks requests from cloud hosts, so crawling can't happen there.
+- **MCP server** (`server/`, Bun + TypeScript): runs on Railway and answers MCP requests from the uploaded SQLite file, kept on a Railway volume. It never contacts Devpost, so there are no rate limits while brainstorming.
 
 There's no scheduled crawling. You run the update yourself when you want fresher data.
 
-**Scope:** hackathons that ended on or after 2024-01-01 with at least 100 registrations, plus every open and upcoming hackathon. Registrations are the only size signal Devpost exposes, and the 100 cutoff keeps student and builder events while dropping classroom-sized ones. Both thresholds are `SINCE` and `MIN_REGISTRATIONS` in `src/devpost_mcp/crawl.py`. If you change them, the next `crawl` and `push` remove whatever falls out of scope, locally and in D1.
+**Scope:** hackathons that ended on or after 2024-01-01 with at least 100 registrations, plus every open and upcoming hackathon. Registrations are the only size signal Devpost exposes, and the 100 cutoff keeps student and builder events while dropping classroom-sized ones. Both thresholds are `SINCE` and `MIN_REGISTRATIONS` in `src/devpost_mcp/crawl.py`. If you change them, the next `crawl` and `push` remove whatever falls out of scope.
 
 ## Connect (teammates)
 
 You need the server URL and the team token from whoever runs the crawler. Then:
 
 ```bash
-claude mcp add --transport http --scope user devpost https://devpost-mcp.sudoanmol.workers.dev/mcp --header "Authorization: Bearer <team-token>"
+claude mcp add --transport http --scope user devpost https://devpost-mcp-production.up.railway.app/mcp --header "Authorization: Bearer <team-token>"
 ```
 
 Other MCP clients take the same URL and `Authorization` header.
@@ -28,7 +28,7 @@ Other MCP clients take the same URL and `Authorization` header.
   "mcpServers": {
     "devpost": {
       "command": "npx",
-      "args": ["-y", "mcp-remote@0.14.3", "https://devpost-mcp.sudoanmol.workers.dev/mcp", "--header", "Authorization: Bearer <team-token>"]
+      "args": ["-y", "mcp-remote@0.14.3", "https://devpost-mcp-production.up.railway.app/mcp", "--header", "Authorization: Bearer <team-token>"]
     }
   }
 }
@@ -102,23 +102,30 @@ uv run devpost crawl
 uv run devpost push
 ```
 
-`crawl` only fetches what changed since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` uploads only rows changed since the last push. `uv run devpost stats` shows what the local database holds.
+`crawl` only fetches what changed since the last run: new hackathons, status changes, newly announced winners, entrant counts for newly judged tracks, and winners' project pages. The first run takes a few hours. Every phase is resumable, so if it stops, run it again. `push` snapshots the database, gzips it (about 60 MB), and uploads it. The server checks the file and swaps it in, so in-flight requests are never interrupted. `uv run devpost stats` shows what the local database holds.
 
 Keep `data/devpost.db`, because it's what makes updates incremental. If it's lost, run the full crawl again.
 
-On the Workers Free plan, D1 allows 100,000 rows written per day, and an upsert writes about two rows (one for the row, one per index). An ordinary update fits easily. A first push or a full re-crawl doesn't, so either spread it over several days or use the Workers Paid plan ($5 a month, 50 million writes). If the limit stops a push partway through, rerun it after the daily reset at 00:00 UTC. Rows that already landed are sent again, which is harmless but uses some of that day's allowance.
-
-## Deploying the Worker (maintainer)
+## Deploying the server (maintainer)
 
 ```bash
-cd worker
+cd server
 bun install
 bun test
-bun run deploy
-wrangler secret put TEAM_TOKEN < .team-token
+railway up
 ```
 
-`.team-token` is gitignored. To revoke access, put a new token there, run the `secret put` again, and send teammates the new token.
+The service runs from `server/Dockerfile` with a volume mounted at `/data` and three variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `TEAM_TOKEN` | Bearer token teammates send to `/mcp`; local copy in `server/.team-token` |
+| `UPLOAD_TOKEN` | Bearer token `push` sends to `/db`; local copy in `server/.upload-token` |
+| `DB_PATH` | `/data/devpost.db` |
+
+Both token files are gitignored. Keep the upload token to yourself: anyone holding it can replace the data. To revoke teammates' access, put a new token in `.team-token`, run `railway variables --set "TEAM_TOKEN=$(cat .team-token)"`, and send them the new one. `push` uploads to `https://devpost-mcp-production.up.railway.app` unless `DEVPOST_SERVER` is set.
+
+To run the server locally, start it with `DB_PATH=../data/devpost.db TEAM_TOKEN=... bun run dev`.
 
 ## Limits
 

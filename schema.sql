@@ -1,4 +1,4 @@
--- Shared by the local crawl database and D1.
+-- The crawl database, which the MCP server reads as-is.
 
 CREATE TABLE IF NOT EXISTS hackathons (
   id INTEGER PRIMARY KEY,
@@ -69,5 +69,5 @@ CREATE TRIGGER IF NOT EXISTS projects_au AFTER UPDATE ON projects BEGIN
   INSERT INTO projects_fts(rowid, name, tagline, built_with) VALUES (new.rowid, new.name, new.tagline, new.built_with);
 END;
 
--- index-wide counts, written by the crawler on each push
+-- index-wide counts, refreshed by the crawler before each upload
 CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value);

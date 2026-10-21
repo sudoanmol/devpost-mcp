@@ -5,6 +5,7 @@
 // Feasibility, demo quality and impact stay with the agent, which gets the hackathon's own judging
 // criteria and the targeted sponsors' briefs to rate them against.
 
+import type { Database } from "bun:sqlite";
 import { getHackathon, projectHit, searchProjects, sponsorKey, sponsorProfile, titleSponsor, winnerBaseline, type ProjectHit, type Track } from "./db";
 
 // ponytail: lexical TF-IDF misses paraphrases ("ASL" vs "sign language"); swap in embeddings if that bites
@@ -66,7 +67,7 @@ export function winnerLift(near: { sim: number; winner: boolean }[], baseline: n
 }
 
 /** Every track the ideas are scored against, with the text fit is measured on. */
-async function targetTracks(db: D1Database, hackathonUrl: string | undefined, sponsors: string[], extra: ExtraTrack[]) {
+async function targetTracks(db: Database, hackathonUrl: string | undefined, sponsors: string[], extra: ExtraTrack[]) {
 	const hackathon = hackathonUrl ? await getHackathon(db, hackathonUrl) : null;
 	if (hackathonUrl && !hackathon) throw new Error(`no hackathon at ${hackathonUrl} in the index; find it with search_hackathons`);
 	const all = hackathon?.tracks ?? [];
@@ -106,10 +107,10 @@ async function targetTracks(db: D1Database, hackathonUrl: string | undefined, sp
 
 type Target = Awaited<ReturnType<typeof targetTracks>>["tracks"][number];
 
-async function scoreOne(db: D1Database, input: IdeaInput, targets: Target[], baseline: number, weights: Weights) {
+async function scoreOne(db: Database, input: IdeaInput, targets: Target[], baseline: number, weights: Weights) {
 	const searches = input.queries.length ? input.queries : [tokens(input.idea).slice(0, 4).join(" ")];
 	// "any" mode casts a wide net; TF-IDF below decides what is actually close
-	// stop words dropped first: in "any" mode a word like "app" matches (and D1 bills) tens of thousands of rows
+	// stop words dropped first: in "any" mode a word like "app" matches tens of thousands of rows
 	const hits = (
 		await Promise.all(searches.map((q) => searchProjects(db, tokens(q).join(" "), { mode: "any", winnersOnly: false, limit: 100 })))
 	).flat();
@@ -157,7 +158,7 @@ async function scoreOne(db: D1Database, input: IdeaInput, targets: Target[], bas
 }
 
 export async function scoreIdeas(
-	db: D1Database,
+	db: Database,
 	opts: { ideas: IdeaInput[]; hackathonUrl?: string; sponsors: string[]; extraTracks: ExtraTrack[]; weights: Weights },
 ) {
 	if (opts.sponsors.length && !opts.hackathonUrl) throw new Error("sponsors needs hackathon_url: sponsor tracks are read from that hackathon's prizes");

@@ -1,7 +1,7 @@
 """Fetch and parse Devpost: the JSON hackathon listing plus server-rendered HTML pages.
 
 Devpost answers plain HTTP from a normal machine, so no headless browser. It returns 403 to
-Cloudflare Workers, which is why crawling happens locally and the Worker only reads D1.
+cloud hosts such as Cloudflare Workers, which is why crawling happens locally and the server only reads.
 """
 
 import asyncio

@@ -1,13 +1,10 @@
-import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler } from "agents/mcp/server";
+import { Database } from "bun:sqlite";
+import { timingSafeEqual } from "node:crypto";
+import { existsSync, renameSync, rmSync } from "node:fs";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import * as db from "./db";
 import { DEFAULT_WEIGHTS, scoreIdeas } from "./scoring";
-
-interface Env {
-	DB: D1Database;
-	TEAM_TOKEN: string;
-}
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 1) }] });
 const fail = (message: string) => ({ content: [{ type: "text" as const, text: message }], isError: true });
@@ -16,7 +13,7 @@ const notFound = (what: string) => fail(`${what} is not in the index. Find the r
 const limit = (max: number, fallback: number) => z.number().int().min(1).max(max).default(fallback);
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
 
-function createServer(env: Env) {
+function createServer(database: Database) {
 	const server = new McpServer(
 		{ name: "devpost", version: "3.0.0" },
 		{
@@ -47,7 +44,7 @@ function createServer(env: Env) {
 				offset: z.number().int().min(0).default(0),
 			}),
 		},
-		async (args) => ok(await db.searchHackathons(env.DB, args)),
+		async (args) => ok(await db.searchHackathons(database, args)),
 	);
 
 	server.registerTool(
@@ -59,7 +56,7 @@ function createServer(env: Env) {
 			inputSchema: z.object({ url: z.string().describe("e.g. https://treehacks-2024.devpost.com") }),
 		},
 		async ({ url }) => {
-			const h = await db.getHackathon(env.DB, url);
+			const h = await db.getHackathon(database, url);
 			return h ? ok(h) : notFound(url);
 		},
 	);
@@ -75,7 +72,7 @@ function createServer(env: Env) {
 				offset: z.number().int().min(0).default(0),
 			}),
 		},
-		async ({ url, winners_only, limit, offset }) => ok(await db.listProjects(env.DB, url, winners_only, limit, offset)),
+		async ({ url, winners_only, limit, offset }) => ok(await db.listProjects(database, url, winners_only, limit, offset)),
 	);
 
 	server.registerTool(
@@ -87,7 +84,7 @@ function createServer(env: Env) {
 			inputSchema: z.object({ url: z.string(), sponsor: z.string().optional() }),
 		},
 		async ({ url, sponsor }) => {
-			const w = await db.getWinners(env.DB, url, sponsor);
+			const w = await db.getWinners(database, url, sponsor);
 			return w ? ok(w) : notFound(url);
 		},
 	);
@@ -105,7 +102,7 @@ function createServer(env: Env) {
 				limit: limit(50, 15).describe("number of hackathons"),
 			}),
 		},
-		async ({ sponsor, ended_after, limit }) => ok(await db.findSponsorWinners(env.DB, sponsor, ended_after, limit)),
+		async ({ sponsor, ended_after, limit }) => ok(await db.findSponsorWinners(database, sponsor, ended_after, limit)),
 	);
 
 	server.registerTool(
@@ -123,7 +120,7 @@ function createServer(env: Env) {
 			}),
 		},
 		async ({ query, mode, winners_only, ended_after, limit }) => {
-			const hits = await db.searchProjects(env.DB, query, { mode, winnersOnly: winners_only, endedAfter: ended_after, limit });
+			const hits = await db.searchProjects(database, query, { mode, winnersOnly: winners_only, endedAfter: ended_after, limit });
 			return ok({ query, returned: hits.length, projects: hits.map(db.projectHit) });
 		},
 	);
@@ -135,7 +132,7 @@ function createServer(env: Env) {
 			inputSchema: z.object({ url: z.string().describe("devpost.com/software/... URL or slug") }),
 		},
 		async ({ url }) => {
-			const p = await db.getProject(env.DB, url);
+			const p = await db.getProject(database, url);
 			return p ? ok(p) : notFound(url);
 		},
 	);
@@ -180,7 +177,7 @@ function createServer(env: Env) {
 		},
 		async ({ ideas, hackathon_url, sponsors, extra_tracks, weights }) => {
 			try {
-				return ok(await scoreIdeas(env.DB, { ideas, hackathonUrl: hackathon_url, sponsors, extraTracks: extra_tracks, weights }));
+				return ok(await scoreIdeas(database, { ideas, hackathonUrl: hackathon_url, sponsors, extraTracks: extra_tracks, weights }));
 			} catch (e) {
 				return fail((e as Error).message);
 			}
@@ -190,23 +187,68 @@ function createServer(env: Env) {
 	server.registerTool(
 		"index_info",
 		{ description: "How much the index holds and when it was last updated.", inputSchema: z.object({}) },
-		async () => ok(await db.indexInfo(env.DB)),
+		async () => ok(await db.indexInfo(database)),
 	);
 
 	return server;
 }
 
-async function authorized(request: Request, token: string): Promise<boolean> {
-	const given = new TextEncoder().encode(request.headers.get("Authorization") ?? "");
-	const expected = new TextEncoder().encode(`Bearer ${token}`);
-	return given.byteLength === expected.byteLength && crypto.subtle.timingSafeEqual(given, expected);
+function authorized(request: Request, token: string | undefined): boolean {
+	if (!token) return false;
+	const given = Buffer.from(request.headers.get("Authorization") ?? "");
+	const expected = Buffer.from(`Bearer ${token}`);
+	return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-export default {
-	async fetch(request, env, ctx) {
-		if (!env.TEAM_TOKEN || !(await authorized(request, env.TEAM_TOKEN))) {
-			return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
-		}
-		return createMcpHandler(() => createServer(env))(request, env, ctx);
+const DB_PATH = process.env.DB_PATH ?? "devpost.db";
+const open = () => (existsSync(DB_PATH) ? new Database(DB_PATH, { readonly: true }) : null);
+let current = open();
+
+const mcp = createMcpHandler(() => createServer(current!));
+
+/** The crawler uploads a fresh gzipped database; it replaces the live one only if it opens and has stats. */
+async function replaceDatabase(request: Request): Promise<Response> {
+	if (!request.body) return new Response("Expected a gzipped SQLite file", { status: 400 });
+	const upload = `${DB_PATH}.upload`;
+	try {
+		// a FileSink loop: Bun.write(path, new Response(stream)) never settles for request streams in Bun 1.4
+		const file = Bun.file(upload).writer();
+		for await (const chunk of request.body.pipeThrough(new DecompressionStream("gzip"))) file.write(chunk);
+		await file.end();
+		const check = new Database(upload, { readonly: true });
+		const stats = check.query("SELECT key, value FROM stats").all();
+		check.close();
+		if (!stats.length) throw new Error("stats table is empty");
+	} catch (e) {
+		rmSync(upload, { force: true });
+		return new Response(`Rejected upload: ${(e as Error).message}`, { status: 400 });
+	}
+	// rename is atomic on one volume; the old handle keeps reading the old file until closed
+	renameSync(upload, DB_PATH);
+	const previous = current;
+	current = open();
+	previous?.close();
+	return Response.json(await db.indexInfo(current!));
+}
+
+const unauthorized = () => new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
+
+const server = Bun.serve({
+	port: Number(process.env.PORT ?? 3000),
+	maxRequestBodySize: 2 ** 30,
+	idleTimeout: 120,
+	routes: {
+		"/health": () => new Response(current ? "ok" : "no data uploaded yet"),
+		"/db": {
+			PUT: (request) => (authorized(request, process.env.UPLOAD_TOKEN) ? replaceDatabase(request) : unauthorized()),
+		},
+		"/mcp": (request) => {
+			if (!authorized(request, process.env.TEAM_TOKEN)) return unauthorized();
+			if (!current) return new Response("No data uploaded yet; run `uv run devpost push`", { status: 503 });
+			return mcp.fetch(request);
+		},
 	},
-} satisfies ExportedHandler<Env>;
+	fetch: () => new Response("Not found", { status: 404 }),
+});
+
+console.log(`devpost-mcp listening on ${server.url} with ${current ? DB_PATH : "no database yet"}`);

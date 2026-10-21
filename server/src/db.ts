@@ -1,4 +1,6 @@
-// Read-only queries over the crawled Devpost index in D1 (schema.sql at the repo root).
+// Read-only queries over the crawled Devpost index (schema.sql at the repo root).
+
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 
 type Row = Record<string, unknown>;
 
@@ -20,8 +22,8 @@ export function ftsQuery(text: string, mode: "all" | "any"): string | null {
 	return terms.length ? terms.map((t) => `"${t}"`).join(mode === "all" ? " " : " OR ") : null;
 }
 
-async function all<T = Row>(db: D1Database, sql: string, ...params: unknown[]): Promise<T[]> {
-	return (await db.prepare(sql).bind(...params).all<T>()).results;
+async function all<T = Row>(db: Database, sql: string, ...params: unknown[]): Promise<T[]> {
+	return db.query(sql).all(...(params as SQLQueryBindings[])) as T[];
 }
 
 function hackathon(h: Row) {
@@ -53,7 +55,7 @@ export type HackathonFilters = {
 	offset: number;
 };
 
-export async function searchHackathons(db: D1Database, f: HackathonFilters) {
+export async function searchHackathons(db: Database, f: HackathonFilters) {
 	const where: string[] = [];
 	const params: unknown[] = [];
 	const add = (clause: string, ...values: unknown[]) => {
@@ -123,7 +125,7 @@ export function tracks(prizes: PrizeRow[]) {
 
 export type Track = ReturnType<typeof tracks>[number];
 
-export async function getHackathon(db: D1Database, url: string) {
+export async function getHackathon(db: Database, url: string) {
 	const root = hackathonRoot(url);
 	const [h] = await all(db, "SELECT * FROM hackathons WHERE url = ?", root);
 	if (!h) return null;
@@ -137,7 +139,7 @@ export async function getHackathon(db: D1Database, url: string) {
 	};
 }
 
-export async function listProjects(db: D1Database, url: string, winnersOnly: boolean, limit: number, offset: number) {
+export async function listProjects(db: Database, url: string, winnersOnly: boolean, limit: number, offset: number) {
 	const root = hackathonRoot(url);
 	const rows = await all(
 		db,
@@ -175,7 +177,7 @@ const winner = (r: WinnerRow, prizes: string[] | null) => ({
 	prizes,
 });
 
-export async function getWinners(db: D1Database, url: string, sponsor?: string) {
+export async function getWinners(db: Database, url: string, sponsor?: string) {
 	const root = hackathonRoot(url);
 	const [h] = await all<{ id: number; title: string; dates: string }>(db, "SELECT id, title, dates FROM hackathons WHERE url = ?", root);
 	if (!h) return null;
@@ -211,7 +213,7 @@ export function mentions(text: string | null, sponsor: string): string[] {
 		.map((s) => s.trim().slice(0, 300));
 }
 
-async function sponsorTracks(db: D1Database, hackathonId: number, sponsor: string, winners: WinnerRow[]) {
+async function sponsorTracks(db: Database, hackathonId: number, sponsor: string, winners: WinnerRow[]) {
 	const prizes = await all<PrizeRow>(
 		db,
 		`SELECT ${PRIZE_COLUMNS} FROM prizes WHERE hackathon_id = ? AND title LIKE ? ORDER BY id`,
@@ -234,8 +236,8 @@ const median = (xs: number[]) => {
 };
 
 /** What a sponsor has asked for and rewarded before, and how crowded its tracks were. */
-export async function sponsorProfile(db: D1Database, sponsor: string) {
-	// one pass over prizes, then winners through the (hackathon_id, winner) index; D1 bills every row a query reads
+export async function sponsorProfile(db: Database, sponsor: string) {
+	// one pass over prizes, then winners through the (hackathon_id, winner) index
 	const past = await all<PrizeRow & { hackathon_id: number }>(
 		db,
 		`SELECT p.title, p.value, p.winners, p.description, p.entrants, p.hackathon_id FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
@@ -262,7 +264,7 @@ export async function sponsorProfile(db: D1Database, sponsor: string) {
 	};
 }
 
-export async function findSponsorWinners(db: D1Database, sponsor: string, endedAfter: string | undefined, limit: number) {
+export async function findSponsorWinners(db: Database, sponsor: string, endedAfter: string | undefined, limit: number) {
 	const hackathons = await all<{ id: number; title: string; url: string; dates: string }>(
 		db,
 		`SELECT id, title, url, dates FROM hackathons
@@ -297,7 +299,7 @@ export type ProjectHit = {
 };
 
 export async function searchProjects(
-	db: D1Database,
+	db: Database,
 	query: string,
 	opts: { mode: "all" | "any"; winnersOnly: boolean; endedAfter?: string; limit: number },
 ): Promise<ProjectHit[]> {
@@ -338,7 +340,7 @@ export const projectHit = (p: ProjectHit) => ({
 	last_ended: p.last_ended,
 });
 
-export async function getProject(db: D1Database, urlOrSlug: string) {
+export async function getProject(db: Database, urlOrSlug: string) {
 	const slug = projectSlug(urlOrSlug);
 	const [p] = await all(db, "SELECT * FROM projects WHERE slug = ?", slug);
 	if (!p) return null;
@@ -361,14 +363,14 @@ export async function getProject(db: D1Database, urlOrSlug: string) {
 	};
 }
 
-// counted by the crawler at push time: counting here would read every row on each call
-export async function indexInfo(db: D1Database): Promise<Record<string, string | number>> {
+// counted by the crawler before upload, so no call scans whole tables
+export async function indexInfo(db: Database): Promise<Record<string, string | number>> {
 	const rows = await all<{ key: string; value: string | number }>(db, "SELECT key, value FROM stats");
 	return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
 /** Share of indexed projects that won something: the baseline "proven space" is measured against. */
-export async function winnerBaseline(db: D1Database): Promise<number> {
+export async function winnerBaseline(db: Database): Promise<number> {
 	const [r] = await all<{ value: number }>(db, "SELECT value FROM stats WHERE key = 'winner_baseline'");
 	return r?.value ?? 0;
 }

@@ -6,7 +6,7 @@
     "module": "Preserve",
     "moduleDetection": "force",
     "allowJs": true,
-    "types": ["@cloudflare/workers-types"],
+    "types": ["bun"],
 
     // Bundler mode
     "moduleResolution": "bundler",
@@ -26,6 +26,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": ["src"]
 }
