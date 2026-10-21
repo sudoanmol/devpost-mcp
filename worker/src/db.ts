@@ -235,31 +235,30 @@ const median = (xs: number[]) => {
 
 /** What a sponsor has asked for and rewarded before, and how crowded its tracks were. */
 export async function sponsorProfile(db: D1Database, sponsor: string) {
-	const like = `%${sponsorKey(sponsor)}%`;
-	const [briefs, winners, past] = await Promise.all([
-		all<{ description: string }>(
-			db,
-			`SELECT p.description FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
-			 WHERE p.title LIKE ? AND length(p.description) > 80 GROUP BY p.description ORDER BY MAX(h.ends_on) DESC LIMIT 6`,
-			like,
-		),
-		all<{ name: string; tagline: string | null }>(
-			db,
-			`SELECT pr.name, pr.tagline FROM submissions s JOIN projects pr ON pr.slug = s.slug JOIN hackathons h ON h.id = s.hackathon_id
-			 WHERE s.winner = 1 AND s.prizes LIKE ? ORDER BY h.ends_on DESC LIMIT 20`,
-			like,
-		),
-		all<{ entrants: number; winners: string | null }>(
-			db,
-			`SELECT p.entrants, p.winners FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
-			 WHERE p.title LIKE ? AND p.entrants > 0 ORDER BY h.ends_on DESC LIMIT 20`,
-			like,
-		),
-	]);
+	// one pass over prizes, then winners through the (hackathon_id, winner) index; D1 bills every row a query reads
+	const past = await all<PrizeRow & { hackathon_id: number }>(
+		db,
+		`SELECT ${PRIZE_COLUMNS}, p.hackathon_id FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
+		 WHERE p.title LIKE ? AND h.winners_announced = 1 ORDER BY h.ends_on DESC LIMIT 30`,
+		`%${sponsorKey(sponsor)}%`,
+	);
+	const ids = [...new Set(past.map((p) => p.hackathon_id))];
+	const winners = ids.length
+		? await all<{ name: string; tagline: string | null; prizes: string | null }>(
+				db,
+				`SELECT pr.name, pr.tagline, s.prizes FROM submissions s JOIN projects pr ON pr.slug = s.slug
+				 WHERE s.winner = 1 AND s.hackathon_id IN (${ids.map(() => "?").join(", ")})`,
+				...ids,
+			)
+		: [];
+	const titles = new Set(past.map((p) => p.title));
+	const briefs = [...new Set(past.flatMap((p) => (p.description && p.description.length > 80 ? [p.description] : [])))].slice(0, 6);
+	const won = winners.filter((w) => (json(w.prizes) as string[] | null)?.some((t) => titles.has(t))).slice(0, 20);
+	const counted = past.filter((p) => p.entrants);
 	return {
-		text: [...briefs.map((b) => b.description), ...winners.map((w) => `${w.name} ${w.tagline ?? ""}`)].join("\n"),
-		past_tracks_counted: past.length,
-		past_entrants_per_slot: median(past.map((p) => Math.round((10 * p.entrants) / slots(p.winners)) / 10)),
+		text: [...briefs, ...won.map((w) => `${w.name} ${w.tagline ?? ""}`)].join("\n"),
+		past_tracks_counted: counted.length,
+		past_entrants_per_slot: median(counted.map((p) => Math.round((10 * p.entrants!) / slots(p.winners)) / 10)),
 	};
 }
 
@@ -362,22 +361,14 @@ export async function getProject(db: D1Database, urlOrSlug: string) {
 	};
 }
 
-/** Share of indexed projects that won something: the baseline "proven space" is measured against. */
-export async function winnerBaseline(db: D1Database): Promise<number> {
-	const [r] = await all<{ rate: number }>(
-		db,
-		"SELECT (SELECT COUNT(DISTINCT slug) FROM submissions WHERE winner = 1) * 1.0 / (SELECT COUNT(*) FROM projects) AS rate",
-	);
-	return r?.rate ?? 0;
+// counted by the crawler at push time: counting here would read every row on each call
+export async function indexInfo(db: D1Database): Promise<Record<string, string | number>> {
+	const rows = await all<{ key: string; value: string | number }>(db, "SELECT key, value FROM stats");
+	return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
-export async function indexInfo(db: D1Database) {
-	const [row] = await all(
-		db,
-		`SELECT (SELECT COUNT(*) FROM hackathons) AS hackathons, (SELECT COUNT(*) FROM projects) AS projects,
-		   (SELECT COUNT(*) FROM prizes) AS prize_tracks, (SELECT COUNT(*) FROM submissions WHERE winner = 1) AS winning_entries,
-		   (SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL) AS tracks_with_entrant_counts,
-		   (SELECT MAX(updated_at) FROM hackathons) AS last_updated`,
-	);
-	return row;
+/** Share of indexed projects that won something: the baseline "proven space" is measured against. */
+export async function winnerBaseline(db: D1Database): Promise<number> {
+	const [r] = await all<{ value: number }>(db, "SELECT value FROM stats WHERE key = 'winner_baseline'");
+	return r?.value ?? 0;
 }

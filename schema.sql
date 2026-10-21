@@ -68,3 +68,6 @@ CREATE TRIGGER IF NOT EXISTS projects_au AFTER UPDATE ON projects BEGIN
   INSERT INTO projects_fts(projects_fts, rowid, name, tagline, built_with) VALUES ('delete', old.rowid, old.name, old.tagline, old.built_with);
   INSERT INTO projects_fts(rowid, name, tagline, built_with) VALUES (new.rowid, new.name, new.tagline, new.built_with);
 END;
+
+-- index-wide counts, written by the crawler on each push
+CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value);

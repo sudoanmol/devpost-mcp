@@ -84,8 +84,10 @@ async function targetTracks(db: D1Database, hackathonUrl: string | undefined, sp
 	};
 	const withText = await Promise.all(
 		listed.map(async (t) => {
-			const sponsor = sponsors.find((sp) => matches(sp, t)) ?? titleSponsor(t.track);
-			const p = sponsor ? await profile(sponsor) : null;
+			const targeted = sponsors.find((sp) => matches(sp, t));
+			const sponsor = targeted ?? titleSponsor(t.track);
+			// profiles cost a scan of prizes, so fetch one only when it's asked for or the brief needs it
+			const p = sponsor && (targeted || t.challenge.length < THIN_BRIEF) ? await profile(sponsor) : null;
 			const thin = t.challenge.length < THIN_BRIEF && !!p?.text;
 			return {
 				...t,
@@ -107,7 +109,10 @@ type Target = Awaited<ReturnType<typeof targetTracks>>["tracks"][number];
 async function scoreOne(db: D1Database, input: IdeaInput, targets: Target[], baseline: number, weights: Weights) {
 	const searches = input.queries.length ? input.queries : [tokens(input.idea).slice(0, 4).join(" ")];
 	// "any" mode casts a wide net; TF-IDF below decides what is actually close
-	const hits = (await Promise.all(searches.map((q) => searchProjects(db, q, { mode: "any", winnersOnly: false, limit: 100 })))).flat();
+	// stop words dropped first: in "any" mode a word like "app" matches (and D1 bills) tens of thousands of rows
+	const hits = (
+		await Promise.all(searches.map((q) => searchProjects(db, tokens(q).join(" "), { mode: "any", winnersOnly: false, limit: 100 })))
+	).flat();
 	const corpus = [...new Map(hits.map((p) => [p.slug, p])).values()];
 
 	const vecs = tfidf([tokens(input.idea), ...corpus.map((p) => tokens(projectText(p))), ...targets.map((t) => tokens(t.text))]);

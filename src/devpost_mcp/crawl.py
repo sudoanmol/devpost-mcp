@@ -280,7 +280,7 @@ STATEMENTS_PER_FILE = 20_000
 def sql_literal(v: object) -> str:
     if v is None:
         return "NULL"
-    if isinstance(v, int):
+    if isinstance(v, (int, float)):
         return str(v)
     return "'" + str(v).replace("'", "''") + "'"
 
@@ -311,6 +311,22 @@ def changed_statements(conn: sqlite3.Connection, since: str) -> Iterable[str]:
         yield upsert("prizes", row)
 
 
+# what index_info reports; counted here so the Worker never scans whole tables (D1 bills every row read)
+STATS = {
+    "hackathons": "SELECT COUNT(*) FROM hackathons",
+    "projects": "SELECT COUNT(*) FROM projects",
+    "prize_tracks": "SELECT COUNT(*) FROM prizes",
+    "winning_entries": "SELECT COUNT(*) FROM submissions WHERE winner = 1",
+    "tracks_with_entrant_counts": "SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL",
+    "winner_baseline": "SELECT ROUND((SELECT COUNT(DISTINCT slug) FROM submissions WHERE winner = 1) * 1.0 / COUNT(*), 4) FROM projects",
+    "last_updated": "SELECT MAX(updated_at) FROM hackathons",
+}
+
+
+def stats_statements(conn: sqlite3.Connection) -> list[str]:
+    return [f"INSERT OR REPLACE INTO stats (key, value) VALUES ('{k}', {sql_literal(conn.execute(q).fetchone()[0])});" for k, q in STATS.items()]
+
+
 def wrangler(*args: str) -> None:
     subprocess.run(["wrangler", "d1", "execute", "DB", "--remote", "--yes", "--config", str(WRANGLER_CONFIG), *args], check=True)
 
@@ -319,8 +335,7 @@ def push() -> None:
     conn = connect()
     since = (conn.execute("SELECT value FROM meta WHERE key = 'pushed_at'").fetchone() or [""])[0]
     started = now()
-    if not since:
-        wrangler("--file", str(ROOT / "schema.sql"))
+    wrangler("--file", str(ROOT / "schema.sql"))  # all IF NOT EXISTS, so it only adds what's new
     batch: list[str] = []
     sent = 0
 
@@ -334,7 +349,7 @@ def push() -> None:
         print(f"push: {sent} statements sent", flush=True)
         batch.clear()
 
-    for statement in changed_statements(conn, since):
+    for statement in [*changed_statements(conn, since), *stats_statements(conn)]:
         batch.append(statement)
         if len(batch) >= STATEMENTS_PER_FILE:
             flush()

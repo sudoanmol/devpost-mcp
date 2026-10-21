@@ -106,6 +106,8 @@ uv run devpost push
 
 Keep `data/devpost.db`, because it's what makes updates incremental. If it's lost, run the full crawl again.
 
+On the Workers Free plan, D1 allows 100,000 rows written per day, and an upsert writes about two rows (one for the row, one per index). An ordinary update fits easily. A first push or a full re-crawl doesn't, so either spread it over several days or use the Workers Paid plan ($5 a month, 50 million writes). If the limit stops a push partway through, rerun it after the daily reset at 00:00 UTC. Rows that already landed are sent again, which is harmless but uses some of that day's allowance.
+
 ## Deploying the Worker (maintainer)
 
 ```bash
