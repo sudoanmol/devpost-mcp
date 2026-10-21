@@ -94,13 +94,15 @@ async def get_hackathon(url: str) -> dict:
     tree = HTMLParser(await _get(root))
     prizes = []
     for p in tree.css("#prizes .prize"):
-        prizes.append(
-            {
-                "title": _text(p.css_first(".prize-title")),
-                "winners": _text(p.css_first(".prize-winners")),
-                "description": _text(p.css_first(".prize-content p")),
-            }
-        )
+        winners = _text(p.css_first(".prize-winners"))
+        value = _text(p.css_first(".prize-value"))
+        content = p.css_first(".prize-content")
+        if content:
+            for meta in content.css(".prize-value, .prize-winners"):
+                meta.decompose()
+        # sponsors put their own judging criteria in here, often several paragraphs down
+        brief = "\n".join(" ".join(line.split()) for line in content.text(separator="\n").splitlines() if line.strip()) if content else ""
+        prizes.append({"title": _text(p.css_first(".prize-title")), "value": value, "winners": winners, "description": brief})
     return {
         "url": root,
         "title": next((t for h in tree.css("h1") if (t := _text(h))), ""),

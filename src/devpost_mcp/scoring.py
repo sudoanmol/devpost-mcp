@@ -21,8 +21,12 @@ STOP = set(
 )
 
 
+def _singular(w: str) -> str:
+    return w[:-1] if len(w) > 4 and w.isalpha() and w.endswith("s") and not w.endswith("ss") else w
+
+
 def tokens(text: str) -> list[str]:
-    return [w.rstrip("s") if len(w) > 4 else w for w in re.findall(r"[a-z0-9][a-z0-9.+#-]*", text.lower()) if w not in STOP and len(w) > 1]
+    return [_singular(w) for w in re.findall(r"[a-z0-9][a-z0-9.+#]*", text.lower()) if w not in STOP and len(w) > 1]
 
 
 def tfidf(docs: list[list[str]]) -> list[dict[str, float]]:
@@ -50,12 +54,20 @@ def _scaled(sim: float, full_at: float) -> float:
     return round(100 * min(1.0, sim / full_at))
 
 
-async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url: str = "") -> dict:
+async def score_idea(
+    idea: str, queries: list[str] | None = None, hackathon_url: str = "", sponsors: list[str] | None = None
+) -> dict:
+    if sponsors and not hackathon_url:
+        raise ValueError("sponsors needs hackathon_url: sponsor tracks are read from that hackathon's prizes")
     queries = queries or [" ".join(tokens(idea)[:4])]
     searches = await asyncio.gather(*(devpost.search_projects(q, pages=4) for q in queries))
     corpus = list({p["url"]: p for s in searches for p in s["projects"]}.values())
     hackathon = await devpost.get_hackathon(hackathon_url) if hackathon_url else None
     prizes = hackathon["prizes"] if hackathon else []
+    if sponsors:
+        # the user is targeting these sponsors, so fit and criteria come from their tracks only
+        unmatched = [sp for sp in sponsors if not any(devpost._matches(sp, p["title"]) for p in prizes)]
+        prizes = [p for p in prizes if any(devpost._matches(sp, p["title"]) for sp in sponsors)]
 
     docs = [tokens(idea)] + [tokens(_project_text(p)) for p in corpus] + [tokens(f"{p['title']} {p['description']}") for p in prizes]
     vecs = tfidf(docs)
@@ -85,7 +97,7 @@ async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url:
         "interpretation": {
             "novelty": "100 = nothing close on Devpost; low = near-duplicate exists (see closest_projects)",
             "proven_space": "share of the 10 closest projects that won a prize",
-            "sponsor_fit": "match against the target hackathon's best-fitting prize track (null if no hackathon given)",
+            "sponsor_fit": "match against the best-fitting prize track (the given sponsors' tracks if any; null if no hackathon)",
             "sweet_spot": "high novelty with high proven_space: an under-built angle in a space judges reward",
         },
         "crowding": {
@@ -94,10 +106,17 @@ async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url:
             "corpus_winner_rate": round(base_rate, 2),
         },
         "closest_projects": [p | {"similarity": round(s, 2)} for s, p in top[:5]],
-        "best_prize_tracks": [{"prize": p["title"], "fit": _scaled(s, 0.3), "challenge": p["description"]} for s, p in fits[:3]],
+        "best_prize_tracks": [
+            {"prize": p["title"], "value": p["value"], "fit": _scaled(s, 0.3), "brief": p["description"]}
+            for s, p in (fits if sponsors else fits[:3])
+        ],
         "judge_yourself": {
-            "criteria": hackathon["judging_criteria"] if hackathon else [],
-            "note": "Rate feasibility in the time limit, demo-ability, and impact against these criteria; past data can't.",
+            "hackathon_criteria": hackathon["judging_criteria"] if hackathon else [],
+            "sponsor_criteria": "each best_prize_tracks brief is the sponsor's own challenge and judging criteria"
+            if sponsors
+            else "pass sponsors=[...] to get the full brief of every track those sponsors run",
+            "unmatched_sponsors": unmatched if sponsors else [],
+            "note": "Rate feasibility in the time limit, demo-ability, and impact against both sets of criteria; past data can't.",
         },
         "queries_used": queries,
         "rate_limited": any(s["rate_limited"] for s in searches),
@@ -108,5 +127,6 @@ if __name__ == "__main__":
     a, b, c = tfidf([tokens("sign language translator glove"), tokens("ASL sign language glove translator"), tokens("crypto wallet for pets")])
     assert cosine(a, b) > 0.5 > cosine(a, c), (cosine(a, b), cosine(a, c))
     assert tokens("The robots using OpenCV") == ["robot", "opencv"]
+    assert tokens("LLM-driven next.js class") == ["llm", "driven", "next.js", "class"]
     assert _scaled(0.9, 0.3) == 100 and _scaled(0.0, 0.3) == 0
     print("ok")

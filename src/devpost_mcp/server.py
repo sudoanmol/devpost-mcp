@@ -96,7 +96,9 @@ async def get_project(url: str) -> dict:
 
 
 @mcp.tool()
-async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url: str = "") -> dict:
+async def score_idea(
+    idea: str, queries: list[str] | None = None, hackathon_url: str = "", sponsors: list[str] | None = None
+) -> dict:
     """Score a hackathon idea against past Devpost projects.
 
     Returns novelty (distance from the closest existing project), proven_space (how often the closest
@@ -107,5 +109,8 @@ async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url:
     queries: 2-4 short keyword searches that would find similar projects, e.g. ["sign language
     translator", "asl glove", "gesture recognition accessibility"]. Better queries = better score.
     hackathon_url: the target hackathon, for prize-track fit and judging criteria.
+    sponsors: sponsors the user is targeting at that hackathon, e.g. ["Fetch.ai", "Intel"]. Scores fit
+    against only their tracks and returns each track's full brief, which is where sponsors state
+    their own challenge and judging criteria. Use whatever sponsors the user picked in this chat.
     """
-    return await scoring.score_idea(idea, queries, hackathon_url)
+    return await scoring.score_idea(idea, queries, hackathon_url, sponsors)
