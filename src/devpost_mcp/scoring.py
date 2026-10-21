@@ -11,6 +11,8 @@ import math
 import re
 from collections import Counter
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 from . import devpost
 
 # ponytail: lexical TF-IDF misses paraphrases ("ASL" vs "sign language"); swap in embeddings if that bites
@@ -58,7 +60,7 @@ async def score_idea(
     idea: str, queries: list[str] | None = None, hackathon_url: str = "", sponsors: list[str] | None = None
 ) -> dict:
     if sponsors and not hackathon_url:
-        raise ValueError("sponsors needs hackathon_url: sponsor tracks are read from that hackathon's prizes")
+        raise ToolError("sponsors needs hackathon_url: sponsor tracks are read from that hackathon's prizes")
     queries = queries or [" ".join(tokens(idea)[:4])]
     searches = await asyncio.gather(*(devpost.search_projects(q, pages=4) for q in queries))
     corpus = list({p["url"]: p for s in searches for p in s["projects"]}.values())
