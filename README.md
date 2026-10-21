@@ -21,6 +21,21 @@ claude mcp add --transport http --scope user devpost https://devpost-mcp.sudoanm
 
 Other MCP clients take the same URL and `Authorization` header.
 
+**Claude desktop app (Chat tab):** custom connectors there can't send an `Authorization` header, so bridge through `mcp-remote` instead. Add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (on Windows, `%APPDATA%\Claude\claude_desktop_config.json`), then restart the app:
+
+```json
+{
+  "mcpServers": {
+    "devpost": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.14.3", "https://devpost-mcp.sudoanmol.workers.dev/mcp", "--header", "Authorization: Bearer <team-token>"]
+    }
+  }
+}
+```
+
+This needs Node.js. If you installed Node with nvm or another version manager, the app won't find `npx` on its own. Set `command` to the absolute path from `which npx`, and add `"env": {"PATH": "<that directory>:/usr/bin:/bin"}`. This works in the desktop app only, not on claude.ai or mobile.
+
 ## Tools
 
 | Tool | What it returns |
