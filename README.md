@@ -144,7 +144,7 @@ The service runs from `server/Dockerfile` with a volume mounted at `/data` and t
 
 Both token files are gitignored. Keep the upload token to yourself: anyone holding it can replace the data. To revoke teammates' access, put a new token in `.team-token`, run `railway variables --set "TEAM_TOKEN=$(cat .team-token)"`, and send them the new one. `push` uploads to `https://devpost-mcp-production.up.railway.app` unless `DEVPOST_SERVER` is set.
 
-To run the server locally, start it with `DB_PATH=../data/devpost.db TEAM_TOKEN=... bun run dev`.
+To run the server locally, start it from `server/` with `HOST=127.0.0.1 PORT=8811 DB_PATH=../data/local-server/devpost.db TEAM_TOKEN=... UPLOAD_TOKEN=... bun run dev`, load the data with `DEVPOST_SERVER=http://localhost:8811 uv run devpost push`, and connect to `http://localhost:8811/mcp`. `HOST=127.0.0.1` keeps it off your network.
 
 ## Limits
 

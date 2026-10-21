@@ -271,6 +271,7 @@ const unauthorized = () => new Response("Unauthorized", { status: 401, headers: 
 
 const server = Bun.serve({
 	port: Number(process.env.PORT ?? 3000),
+	hostname: process.env.HOST ?? "0.0.0.0", // 127.0.0.1 keeps a local run off the network
 	maxRequestBodySize: 2 ** 30,
 	idleTimeout: 120,
 	routes: {
