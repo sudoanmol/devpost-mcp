@@ -1,14 +1,15 @@
 from mcp.server import MCPServer
 
-from . import devpost
+from . import devpost, scoring
 
 mcp = MCPServer(
     "devpost",
     instructions=(
         "Live Devpost data for hackathon ideation. Typical flow: search_hackathons to find the target "
         "event and its past editions, get_hackathon for its prizes/sponsors, get_winners on past editions "
-        "to see what wins, find_sponsor_winners to see what a sponsor rewards across many events, search_projects to check whether an idea already exists anywhere on Devpost, "
-        "get_project for full write-ups."
+        "to see what wins, find_sponsor_winners to see what a sponsor rewards across many events, "
+        "search_projects to check whether an idea already exists, get_project for full write-ups, and "
+        "score_idea to test a draft idea for novelty and prize fit before committing to it."
     ),
 )
 
@@ -87,3 +88,19 @@ async def get_project(url: str) -> dict:
     url: a devpost.com/software/... URL or just the slug.
     """
     return await devpost.get_project(url)
+
+
+@mcp.tool()
+async def score_idea(idea: str, queries: list[str] | None = None, hackathon_url: str = "") -> dict:
+    """Score a hackathon idea against past Devpost projects.
+
+    Returns novelty (distance from the closest existing project), proven_space (how often the closest
+    projects won), sponsor_fit (best-matching prize track of hackathon_url), the closest projects as
+    evidence, and the hackathon's judging criteria for you to rate feasibility/demo/impact yourself.
+
+    idea: a few sentences: problem, solution, key tech.
+    queries: 2-4 short keyword searches that would find similar projects, e.g. ["sign language
+    translator", "asl glove", "gesture recognition accessibility"]. Better queries = better score.
+    hackathon_url: the target hackathon, for prize-track fit and judging criteria.
+    """
+    return await scoring.score_idea(idea, queries, hackathon_url)

@@ -104,6 +104,10 @@ async def get_hackathon(url: str) -> dict:
         "description": _text(tree.css_first("#challenge-description"))[:4000],
         "sponsors": [img.attributes.get("alt", "") for img in tree.css("#sponsor-tiles img")],
         "prizes": prizes,
+        "judging_criteria": [
+            {"criterion": _text(li.css_first("strong")), "description": _text(li).removeprefix(_text(li.css_first("strong"))).strip()}
+            for li in tree.css("#judging-criteria li")
+        ],
     }
 
 
