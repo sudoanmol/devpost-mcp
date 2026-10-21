@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ftsQuery } from "./db";
-import { cosine, scaled, tfidf, tokens } from "./scoring";
+import { cashInBrief, ftsQuery, mentions, sponsorKey, titleSponsor, trackName, tracks } from "./db";
+import { cosine, scaled, tfidf, tokens, winnerLift } from "./scoring";
 
 test("similar ideas score closer than unrelated ones", () => {
 	const [a, b, c] = tfidf([tokens("sign language translator glove"), tokens("ASL sign language glove translator"), tokens("crypto wallet for pets")]);
@@ -22,4 +22,33 @@ test("fts queries quote every term so input can't inject syntax", () => {
 	expect(ftsQuery('sign "language" OR NEAR(', "all")).toBe('"sign" "language" "or" "near"');
 	expect(ftsQuery("asl glove", "any")).toBe('"asl" OR "glove"');
 	expect(ftsQuery("!!!", "any")).toBeNull();
+});
+
+test("placements of one track collapse into one row", () => {
+	expect(trackName("[Creao AI] 2nd Place Best AI-First Disruptor")).toBe("[Creao AI] Best AI-First Disruptor");
+	expect(trackName("Best Use of Fetch.ai - 1st Place")).toBe("Best Use of Fetch.ai");
+	const row = (title: string, entrants: number | null) => ({ title, value: "$ 500 in cash", winners: "1 winner", description: "brief", entrants });
+	const [t, ...rest] = tracks([row("[X] 1st Place Agents", 40), row("[X] 2nd Place Agents", 38), row("[X] 3rd Place Agents", null)]);
+	expect(rest).toEqual([]);
+	expect(t).toMatchObject({ track: "[X] Agents", winner_slots: 3, entrants: 40, entrants_per_slot: 13.3 });
+});
+
+test("cash stated in the brief is flagged only when it disagrees with the listed value", () => {
+	expect(cashInBrief({ value: "$ 10,760 in cash", description: "$1,500 cash / 1 year of Pro ($1,440 value)" })).toBe("$1,500");
+	expect(cashInBrief({ value: "$ 1,500 in cash", description: "$1,500 cash" })).toBeNull();
+	expect(cashInBrief({ value: "$ 500", description: "credits worth $2,000" })).toBeNull();
+});
+
+test("sponsor names normalize across spellings", () => {
+	expect(sponsorKey("Fetch.ai")).toBe("Fetch");
+	expect(titleSponsor("[Fetch.ai] 1st Place Best Use of Fetch.ai")).toBe("Fetch.ai");
+	expect(titleSponsor("Fetch AI: Best Deployment of Agentverse")).toBe("Fetch AI");
+	expect(titleSponsor("Best Overall")).toBeNull();
+	expect(mentions("We built a game. SpacetimeDB holds the live state.\nIt rocks.", "SpacetimeDB")).toEqual(["SpacetimeDB holds the live state."]);
+});
+
+test("winner lift compares weighted winner rate to the baseline", () => {
+	const near = [{ sim: 0.4, winner: true }, ...Array(4).fill({ sim: 0.1, winner: false })];
+	expect(winnerLift(near, 0.25)).toBeCloseTo(2);
+	expect(winnerLift(near.slice(0, 4), 0.25)).toBeNull();
 });

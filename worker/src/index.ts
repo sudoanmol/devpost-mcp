@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import * as db from "./db";
-import { scoreIdea } from "./scoring";
+import { DEFAULT_WEIGHTS, scoreIdeas } from "./scoring";
 
 interface Env {
 	DB: D1Database;
@@ -18,14 +18,14 @@ const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
 
 function createServer(env: Env) {
 	const server = new McpServer(
-		{ name: "devpost", version: "2.0.0" },
+		{ name: "devpost", version: "3.0.0" },
 		{
 			instructions:
 				"An index of Devpost: every hackathon, its prize tracks (with each sponsor's challenge brief and criteria), " +
 				"all submissions, and which projects won which prizes. Typical flow: search_hackathons to find the target " +
 				"event and past editions, get_hackathon for its tracks and judging criteria, get_winners and " +
-				"find_sponsor_winners to see what wins, search_projects to check if an idea exists, score_idea to test " +
-				"drafts. Data comes from a periodic crawl; index_info says how fresh it is.",
+				"find_sponsor_winners to see what wins and how crowded each track was, search_projects to check if an " +
+				"idea exists, score_ideas to rank drafts in one batch. Data comes from a periodic crawl; index_info says how fresh it is.",
 		},
 	);
 
@@ -53,7 +53,9 @@ function createServer(env: Env) {
 	server.registerTool(
 		"get_hackathon",
 		{
-			description: "One hackathon: description, judging criteria, and every prize track with its full brief (where sponsors state their own criteria).",
+			description:
+				"One hackathon: description, judging criteria, and every prize track (placements collapsed) with its full brief " +
+				"(where sponsors state their own criteria), winner slots, and entrants per slot once judged.",
 			inputSchema: z.object({ url: z.string().describe("e.g. https://treehacks-2024.devpost.com") }),
 		},
 		async ({ url }) => {
@@ -81,7 +83,7 @@ function createServer(env: Env) {
 		{
 			description:
 				"Winners of one hackathon with the prizes each won and its tech stack. With sponsor, grouped per matching " +
-				"prize track, each with its challenge brief and winners.",
+				"prize track, each with its challenge brief, entrants, and winners with the write-up sentences that mention the sponsor.",
 			inputSchema: z.object({ url: z.string(), sponsor: z.string().optional() }),
 		},
 		async ({ url, sponsor }) => {
@@ -95,7 +97,8 @@ function createServer(env: Env) {
 		{
 			description:
 				"What one sponsor rewards across hackathons, newest first: for each hackathon, every matching prize track with " +
-				"its challenge brief (sponsors change challenges between events, so compare them) and the winners of that exact track.",
+				"its challenge brief (sponsors change challenges between events, so compare them), entrants per winner slot, and the " +
+					"winners of that exact track with the write-up sentences showing how they used the sponsor.",
 			inputSchema: z.object({
 				sponsor: z.string().describe("matched against prize-track names, e.g. 'Fetch.ai', 'Gemini', 'MLH'"),
 				ended_after: date.optional(),
@@ -138,29 +141,46 @@ function createServer(env: Env) {
 	);
 
 	server.registerTool(
-		"score_idea",
+		"score_ideas",
 		{
 			description:
-				"Score a hackathon idea against past projects: novelty (distance from the closest existing projects), " +
-				"proven_space (how often the closest projects won), sponsor_fit (best-matching prize track), with the closest " +
-				"projects as evidence and the judging criteria to rate feasibility/demo/impact yourself.",
+				"Score and rank up to 10 draft ideas in one call against past projects: novelty (distance from the closest " +
+				"existing projects), proven_space (how much more often similar projects win than projects in general), " +
+				"sponsor_fit (best-matching prize track). Returns a ranking with evidence per idea, plus the target " +
+				"hackathon's judging criteria and track briefs once for the whole batch, so you can rate feasibility/demo/impact yourself.",
 			inputSchema: z.object({
-				idea: z.string().describe("a few sentences: problem, solution, key tech"),
-				queries: z
-					.array(z.string())
-					.max(6)
-					.default([])
-					.describe("2-4 differently worded searches that would find similar projects, e.g. ['sign language translator', 'asl glove']"),
+				ideas: z
+					.array(
+						z.object({
+							idea: z.string().describe("a few sentences: problem, solution, key tech"),
+							queries: z
+								.array(z.string())
+								.max(6)
+								.default([])
+								.describe("2-4 differently worded searches that would find similar projects, e.g. ['sign language translator', 'asl glove']"),
+						}),
+					)
+					.min(1)
+					.max(10),
 				hackathon_url: z.string().optional().describe("the target hackathon, for prize-track fit and judging criteria"),
 				sponsors: z
 					.array(z.string())
 					.default([])
-					.describe("sponsors the user is targeting there; fit and full briefs come from only their tracks"),
+					.describe("sponsors the user is targeting there; fit and briefs come from only their tracks"),
+				extra_tracks: z
+					.array(z.object({ title: z.string(), brief: z.string() }))
+					.max(10)
+					.default([])
+					.describe("tracks not on Devpost yet (from emails, Discord, the event site), scored like Devpost tracks"),
+				weights: z
+					.object({ novelty: z.number().min(0), proven_space: z.number().min(0), sponsor_fit: z.number().min(0) })
+					.default(DEFAULT_WEIGHTS)
+					.describe("relative weights; e.g. raise sponsor_fit when prize money matters most"),
 			}),
 		},
-		async ({ idea, queries, hackathon_url, sponsors }) => {
+		async ({ ideas, hackathon_url, sponsors, extra_tracks, weights }) => {
 			try {
-				return ok(await scoreIdea(env.DB, idea, queries, hackathon_url, sponsors));
+				return ok(await scoreIdeas(env.DB, { ideas, hackathonUrl: hackathon_url, sponsors, extraTracks: extra_tracks, weights }));
 			} catch (e) {
 				return fail((e as Error).message);
 			}
