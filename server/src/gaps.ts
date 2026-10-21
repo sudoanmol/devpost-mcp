@@ -2,7 +2,7 @@
 // common but few teams build, topics that are growing, and topics that are crowded.
 
 import type { Database } from "bun:sqlite";
-import { sponsorKey, winnerBaseline } from "./db";
+import { sponsorKey, sponsorSql, winnerBaseline } from "./db";
 import { DIMS, embed } from "./embeddings";
 
 const MIN_SIZE = 20; // smaller topics are too few projects for a winner rate to mean anything
@@ -42,14 +42,15 @@ export async function findGaps(db: Database, opts: { theme?: string; sponsor?: s
 	}
 
 	if (opts.sponsor) {
+		const [match, pattern] = sponsorSql("s.prizes", sponsorKey(opts.sponsor));
 		const wins = new Map(
 			(
 				db
 					.query(
 						`SELECT pt.topic, COUNT(*) AS wins FROM submissions s JOIN project_topics pt ON pt.slug = s.slug
-						 WHERE s.winner = 1 AND s.prizes LIKE ? GROUP BY pt.topic`,
+						 WHERE s.winner = 1 AND ${match} GROUP BY pt.topic`,
 					)
-					.all(`%${sponsorKey(opts.sponsor)}%`) as { topic: number; wins: number }[]
+					.all(pattern) as { topic: number; wins: number }[]
 			).map((r) => [r.topic, r.wins]),
 		);
 		topics = topics.filter((t) => wins.has(t.topic));

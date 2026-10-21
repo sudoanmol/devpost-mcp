@@ -18,6 +18,20 @@ export function projectSlug(urlOrSlug: string): string {
 	return urlOrSlug.replace(/\/+$/, "").split("/").pop() ?? urlOrSlug;
 }
 
+/**
+ * A sponsor as a whole word, not a substring: "Anthropic" must not match "Most Philanthropic Hack", nor "Meta"
+ * "Metaverse". sponsorSql is the SQL form for a column, namesSponsor the same rule for text already in hand.
+ */
+export function sponsorSql(column: string, sponsor: string): [string, string] {
+	const word = sponsor.toLowerCase().replace(/[*?[\]]/g, ""); // GLOB wildcards
+	return [`(' ' || lower(${column}) || ' ') GLOB ?`, `*[^a-z0-9]${word}[^a-z0-9]*`];
+}
+
+export function namesSponsor(text: string | null | undefined, sponsor: string): boolean {
+	const word = sponsor.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?<![a-z0-9])${word}(?![a-z0-9])`).test((text ?? "").toLowerCase());
+}
+
 /** Turn free text into an FTS5 query of quoted terms, so user input can't break MATCH syntax. */
 export function ftsQuery(text: string, mode: "all" | "any"): string | null {
 	const terms = text.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}.+#]*/gu) ?? [];
@@ -70,7 +84,10 @@ export async function searchHackathons(db: Database, f: HackathonFilters) {
 	if (f.theme) add("themes LIKE ?", `%${f.theme}%`);
 	if (f.ended_after) add("ends_on >= ?", f.ended_after);
 	if (f.ended_before) add("ends_on <= ?", f.ended_before);
-	if (f.sponsor) add("id IN (SELECT hackathon_id FROM prizes WHERE title LIKE ?)", `%${f.sponsor}%`);
+	if (f.sponsor) {
+		const [match, pattern] = sponsorSql("title", f.sponsor);
+		add(`id IN (SELECT hackathon_id FROM prizes WHERE ${match})`, pattern);
+	}
 	const order = f.sort === "largest" ? "registrations DESC" : "ends_on DESC";
 	const sql = `SELECT * FROM hackathons ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY ${order} LIMIT ? OFFSET ?`;
 	const rows = await all(db, sql, ...params, f.limit, f.offset);
@@ -209,21 +226,17 @@ export function titleSponsor(title: string): string | null {
 
 /** Sentences of a write-up that mention the sponsor: how the project actually used it. */
 export function mentions(text: string | null, sponsor: string): string[] {
-	const key = sponsorKey(sponsor).toLowerCase();
+	const key = sponsorKey(sponsor);
 	return (text ?? "")
 		.split(/(?<=[.!?])\s+|\n+/)
-		.filter((s) => s.toLowerCase().includes(key))
+		.filter((s) => namesSponsor(s, key))
 		.slice(0, 3)
 		.map((s) => s.trim().slice(0, 300));
 }
 
 async function sponsorTracks(db: Database, hackathonId: number, sponsor: string, winners: WinnerRow[]) {
-	const prizes = await all<PrizeRow>(
-		db,
-		`SELECT ${PRIZE_COLUMNS} FROM prizes WHERE hackathon_id = ? AND title LIKE ? ORDER BY id`,
-		hackathonId,
-		`%${sponsor}%`,
-	);
+	const [match, pattern] = sponsorSql("title", sponsor);
+	const prizes = await all<PrizeRow>(db, `SELECT ${PRIZE_COLUMNS} FROM prizes WHERE hackathon_id = ? AND ${match} ORDER BY id`, hackathonId, pattern);
 	const norm = (s: string) => s.toLowerCase().replace(/\W+/g, "");
 	return tracks(prizes).map((t) => ({
 		...t,
@@ -242,11 +255,12 @@ const median = (xs: number[]) => {
 /** What a sponsor has asked for and rewarded before, and how crowded its tracks were. */
 export async function sponsorProfile(db: Database, sponsor: string) {
 	// one pass over prizes, then winners through the (hackathon_id, winner) index
+	const [match, pattern] = sponsorSql("p.title", sponsorKey(sponsor));
 	const past = await all<PrizeRow & { hackathon_id: number }>(
 		db,
 		`SELECT p.title, p.value, p.winners, p.description, p.entrants, p.hackathon_id FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
-		 WHERE p.title LIKE ? AND h.winners_announced = 1 ORDER BY h.ends_on DESC LIMIT 30`,
-		`%${sponsorKey(sponsor)}%`,
+		 WHERE ${match} AND h.winners_announced = 1 ORDER BY h.ends_on DESC LIMIT 30`,
+		pattern,
 	);
 	const ids = [...new Set(past.map((p) => p.hackathon_id))];
 	const winners = ids.length
@@ -269,12 +283,13 @@ export async function sponsorProfile(db: Database, sponsor: string) {
 }
 
 export async function findSponsorWinners(db: Database, sponsor: string, endedAfter: string | undefined, limit: number) {
+	const [match, pattern] = sponsorSql("title", sponsor);
 	const hackathons = await all<{ id: number; title: string; url: string; dates: string }>(
 		db,
 		`SELECT id, title, url, dates FROM hackathons
-		 WHERE winners_announced = 1 AND id IN (SELECT hackathon_id FROM prizes WHERE title LIKE ?) ${endedAfter ? "AND ends_on >= ?" : ""}
+		 WHERE winners_announced = 1 AND id IN (SELECT hackathon_id FROM prizes WHERE ${match}) ${endedAfter ? "AND ends_on >= ?" : ""}
 		 ORDER BY ends_on DESC LIMIT ?`,
-		...[`%${sponsor}%`, ...(endedAfter ? [endedAfter] : []), limit],
+		...[pattern, ...(endedAfter ? [endedAfter] : []), limit],
 	);
 	const results = await Promise.all(
 		hackathons.map(async (h) => {

@@ -6,7 +6,7 @@
 // criteria and the targeted sponsors' briefs to rate them against.
 
 import type { Database } from "bun:sqlite";
-import { getHackathon, projectHit, projectsBySlug, searchProjects, sponsorKey, sponsorProfile, titleSponsor, winnerBaseline, type Track } from "./db";
+import { getHackathon, namesSponsor, projectHit, projectsBySlug, searchProjects, sponsorKey, sponsorProfile, titleSponsor, winnerBaseline, type Track } from "./db";
 import { dot, embed, nearest, similarity, type VectorIndex } from "./embeddings";
 
 // words that say nothing about what a project does: dropped from keyword searches and topic labels
@@ -34,7 +34,7 @@ const FIT = { zeroAt: 0.55, fullAt: 0.8 };
 const NEIGHBOURS = 200; // similar_projects counts at most this many
 
 const matches = (sponsor: string, t: { track: string; prizes: Pick<Track["prizes"][number], "title">[] }) =>
-	[t.track, ...t.prizes.map((p) => p.title)].some((title) => title.toLowerCase().includes(sponsor.toLowerCase()));
+	[t.track, ...t.prizes.map((p) => p.title)].some((title) => namesSponsor(title, sponsor));
 
 export type IdeaInput = { idea: string; queries: string[] };
 export type Weights = { novelty: number; proven_space: number; sponsor_fit: number };
@@ -86,7 +86,7 @@ async function targetTracks(db: Database, hackathonUrl: string | undefined, spon
 	return {
 		hackathon,
 		tracks: withText.map((t, i) => ({ ...t, vec: vecs[i]! })),
-		unmatched: sponsors.filter((sp) => !all.some((t) => matches(sp, t)) && !extra.some((x) => x.title.toLowerCase().includes(sp.toLowerCase()))),
+		unmatched: sponsors.filter((sp) => !all.some((t) => matches(sp, t)) && !extra.some((x) => namesSponsor(x.title, sp))),
 	};
 }
 

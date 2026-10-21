@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { cashInBrief, ftsQuery, mentions, sponsorKey, titleSponsor, trackName, tracks } from "./db";
+import { Database } from "bun:sqlite";
+import { cashInBrief, ftsQuery, mentions, namesSponsor, sponsorKey, sponsorSql, titleSponsor, trackName, tracks } from "./db";
 import { DIMS, nearest, quantize, type VectorIndex } from "./embeddings";
 import { scaled, tokens, winnerLift } from "./scoring";
 
@@ -63,4 +64,18 @@ test("winner lift compares weighted winner rate to the baseline", () => {
 	const near = [{ sim: 0.4, winner: true }, ...Array(4).fill({ sim: 0.1, winner: false })];
 	expect(winnerLift(near, 0.25)).toBeCloseTo(2);
 	expect(winnerLift(near.slice(0, 4), 0.25)).toBeNull();
+});
+
+test("sponsors match whole words only, in SQL and in JS", () => {
+	const db = new Database(":memory:");
+	const titles = ["Most Philanthropic Hack - Bloomberg", "Anthropic: Best Use Of Claude", "[Fetch.ai] Best Agent", "Best Metaverse Hack", "Meta: Llama Track"];
+	const hits = (sponsor: string) => {
+		const [match, pattern] = sponsorSql("t", sponsor);
+		return titles.filter((t) => db.query(`SELECT 1 FROM (SELECT ? AS t) WHERE ${match}`).get(t, pattern));
+	};
+	expect(hits("anthropic")).toEqual(["Anthropic: Best Use Of Claude"]);
+	expect(hits("Fetch.ai")).toEqual(["[Fetch.ai] Best Agent"]);
+	expect(hits("Meta")).toEqual(["Meta: Llama Track"]);
+	for (const sponsor of ["anthropic", "Fetch.ai", "Meta"]) expect(titles.filter((t) => namesSponsor(t, sponsor))).toEqual(hits(sponsor));
+	expect(mentions("We gave to philanthropic causes. We used Anthropic's API.", "Anthropic")).toEqual(["We used Anthropic's API."]);
 });
