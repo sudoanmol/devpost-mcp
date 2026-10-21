@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS prizes (
   value TEXT,
   winners TEXT,
   description TEXT,
+  entrants INTEGER,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS prizes_hackathon ON prizes(hackathon_id);

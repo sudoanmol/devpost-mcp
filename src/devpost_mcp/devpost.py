@@ -111,6 +111,18 @@ async def hackathon_page(c: httpx.AsyncClient, url: str) -> dict:
     }
 
 
+def _total(tree: HTMLParser) -> int:
+    """Result count from a gallery page's "1 - 24 of 77"; 0 when there's a single page."""
+    m = re.search(r"of\s+([\d,]+)", _text(tree.css_first(".pagination-info")))
+    return int(m.group(1).replace(",", "")) if m else 0
+
+
+async def entrants(c: httpx.AsyncClient, url: str, prize_id: int) -> int:
+    """How many submissions entered one prize track."""
+    tree = HTMLParser((await fetch(c, f"{url}/submissions/search", {"prize_filter[prizes][]": prize_id})).text)
+    return _total(tree) or len(tree.css(".gallery-item"))
+
+
 def _gallery_item(item: Node) -> dict | None:
     link = item.css_first("a.link-to-software")
     if not link or not link.attributes.get("href"):
@@ -132,8 +144,7 @@ async def gallery(c: httpx.AsyncClient, url: str) -> tuple[int, list[dict]]:
     while True:
         tree = HTMLParser((await fetch(c, f"{url}/project-gallery", {"page": page})).text)
         if page == 1:
-            m = re.search(r"of\s+([\d,]+)", _text(tree.css_first(".pagination-info")))
-            total = int(m.group(1).replace(",", "")) if m else 0
+            total = _total(tree)
         items = [p for i in tree.css(".gallery-item") if (p := _gallery_item(i))]
         projects += items
         if len(items) < 24 or len(projects) >= total:

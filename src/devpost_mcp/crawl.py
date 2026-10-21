@@ -230,6 +230,22 @@ async def crawl_winners(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
     await run_all("winner pages", todo, work)
 
 
+async def crawl_entrants(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
+    """How many submissions entered each judged prize track: the competition per winner slot."""
+    todo = conn.execute(
+        """SELECT p.id, h.url FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
+           WHERE h.status = 'ended' AND h.winners_announced = 1 AND p.entrants IS NULL ORDER BY h.ends_on DESC"""
+    ).fetchall()
+
+    async def work(item: object) -> None:
+        prize_id, url = item
+        count = await devpost.entrants(c, url, prize_id)
+        with conn:
+            conn.execute("UPDATE prizes SET entrants = ?, updated_at = ? WHERE id = ?", (count, now(), prize_id))
+
+    await run_all("track entrants", todo, work)
+
+
 def _set_state(conn: sqlite3.Connection, hid: int, **state: object) -> None:
     conn.execute("INSERT OR IGNORE INTO crawl_state (hackathon_id) VALUES (?)", (hid,))
     for column, value in state.items():
@@ -242,6 +258,7 @@ async def crawl(winners: bool) -> None:
         await crawl_listing(c, conn)
         await crawl_pages(c, conn)
         await crawl_galleries(c, conn)
+        await crawl_entrants(c, conn)
         if winners:
             await crawl_winners(c, conn)
     stats(conn)
@@ -252,7 +269,7 @@ async def crawl(winners: bool) -> None:
 COLUMNS = {
     "hackathons": ["id", "url", "title", "organization", "dates", "ends_on", "status", "location", "themes", "prize_total",
                    "registrations", "winners_announced", "submissions", "tagline", "description", "judging_criteria", "updated_at"],
-    "prizes": ["id", "hackathon_id", "title", "value", "winners", "description", "updated_at"],
+    "prizes": ["id", "hackathon_id", "title", "value", "winners", "description", "entrants", "updated_at"],
     "projects": ["slug", "name", "tagline", "likes", "built_with", "description", "links", "updated_at"],
     "submissions": ["slug", "hackathon_id", "winner", "prizes", "updated_at"],
 }
@@ -285,6 +302,13 @@ def changed_statements(conn: sqlite3.Connection, since: str) -> Iterable[str]:
         yield f"DELETE FROM prizes WHERE hackathon_id = {hid};"
         for row in conn.execute(f"SELECT {', '.join(COLUMNS['prizes'])} FROM prizes WHERE hackathon_id = ?", (hid,)):
             yield upsert("prizes", row)
+    # entrant counts update single prizes without touching their hackathon
+    for row in conn.execute(
+        f"""SELECT {', '.join(COLUMNS['prizes'])} FROM prizes WHERE updated_at > ?
+            AND hackathon_id IN (SELECT id FROM hackathons WHERE updated_at <= ?)""",
+        (since, since),
+    ):
+        yield upsert("prizes", row)
 
 
 def wrangler(*args: str) -> None:
@@ -329,7 +353,7 @@ def stats(conn: sqlite3.Connection | None = None) -> None:
         f"hackathons {q('SELECT COUNT(*) FROM hackathons')} "
         f"(pages {q('SELECT COUNT(*) FROM crawl_state WHERE page_status IS NOT NULL')}, "
         f"galleries {q('SELECT COUNT(*) FROM crawl_state WHERE gallery_winners IS NOT NULL')}) | "
-        f"prizes {q('SELECT COUNT(*) FROM prizes')} | projects {q('SELECT COUNT(*) FROM projects')} | "
+        f"prizes {q('SELECT COUNT(*) FROM prizes')} (entrants counted {q('SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL')}) | projects {q('SELECT COUNT(*) FROM projects')} | "
         f"winning entries {q('SELECT COUNT(*) FROM submissions WHERE winner = 1')} "
         f"(detailed {q('SELECT COUNT(*) FROM project_state')}) | "
         f"db {DB.stat().st_size / 1e6:.0f} MB"
