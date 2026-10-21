@@ -5,10 +5,13 @@ Devpost pages are server-rendered, so plain HTTP is enough; no headless browser.
 
 import asyncio
 import json
+import logging
 import re
 
 import httpx
 from selectolax.lexbor import LexborHTMLParser as HTMLParser, LexborNode as Node
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BASE = "https://devpost.com"
 HEADERS = {"User-Agent": "Mozilla/5.0 (devpost-mcp)", "Accept-Language": "en"}
@@ -48,8 +51,10 @@ def _hackathon_root(url: str) -> str:
 # --- hackathons -----------------------------------------------------------
 
 
-async def search_hackathons(query: str = "", status: str = "", page: int = 1) -> dict:
+async def search_hackathons(query: str = "", status: str = "", page: int = 1, order_by: str = "") -> dict:
     params: list[tuple[str, str | int]] = [("page", page)]
+    if order_by:
+        params.append(("order_by", order_by))
     if query:
         params.append(("search", query))
     if status:
@@ -74,6 +79,10 @@ async def search_hackathons(query: str = "", status: str = "", page: int = 1) ->
             for h in data["hackathons"]
         ],
     }
+
+
+async def _list_ended(query: str, order_by: str, page: int) -> list[dict]:
+    return (await search_hackathons(query, "ended", page, order_by))["hackathons"]
 
 
 async def get_hackathon(url: str) -> dict:
@@ -113,16 +122,25 @@ def _gallery_item(item: Node) -> dict:
     }
 
 
-async def list_hackathon_projects(url: str, winners_only: bool = False, max_pages: int = 5) -> dict:
-    """Gallery pages list winners first, so winners_only can stop at the first non-winner."""
+async def list_hackathon_projects(
+    url: str, winners_only: bool = False, max_pages: int = 5, prize_id: int | None = None, terms: str = ""
+) -> dict:
+    """One hackathon's gallery, optionally narrowed to one prize track or a keyword.
+
+    Galleries list winners first, so winners_only stops at the first non-winner.
+    """
     root = _hackathon_root(url)
+    path, base_params = f"{root}/project-gallery", {}
+    if prize_id or terms:
+        path = f"{root}/submissions/search"
+        base_params = {"terms": terms} | ({"prize_filter[prizes][]": prize_id} if prize_id else {})
     projects: list[dict] = []
     total = 0
     for page in range(1, max_pages + 1):
-        tree = HTMLParser(await _get(f"{root}/project-gallery", {"page": page}))
+        tree = HTMLParser(await _get(path, base_params | {"page": page}))
         if page == 1:
             m = re.search(r"of\s+(\d+)", _text(tree.css_first(".pagination-info")))
-            total = int(m.group(1)) if m else 0
+            total = int(m.group(1)) if m else len(tree.css(".gallery-item"))
         items = [_gallery_item(i) for i in tree.css(".gallery-item")]
         if not items:
             break
@@ -134,6 +152,15 @@ async def list_hackathon_projects(url: str, winners_only: bool = False, max_page
         else:
             projects += items
     return {"hackathon": root, "total_submissions": total, "returned": len(projects), "projects": projects}
+
+
+async def get_prizes(url: str) -> list[dict]:
+    """Prize tracks with the ids the gallery filter uses (parsed from the gallery's filter form)."""
+    tree = HTMLParser(await _get(f"{_hackathon_root(url)}/project-gallery", {"page": 1}))
+    return [
+        {"id": int(i.attributes["value"]), "name": _text(i.parent)}
+        for i in tree.css('input[name="prize_filter[prizes][]"]')
+    ]
 
 
 async def search_projects(query: str, winners_only: bool = False, pages: int = 4) -> dict:
@@ -187,15 +214,95 @@ async def get_project(url: str) -> dict:
     }
 
 
+def _matches(sponsor: str, text: str) -> bool:
+    return sponsor.lower() in text.lower()
+
+
+def _norm(title: str) -> str:
+    return re.sub(r"\W+", "", title.lower())
+
+
+def _winner(d: dict, prizes: list[str]) -> dict:
+    return {k: d[k] for k in ("name", "tagline", "url", "built_with")} | {"prizes": prizes}
+
+
+def _prizes_won(project: dict, root: str) -> list[str]:
+    # the gallery ribbon means "won something here", so the project page is the source of truth
+    return [p for s in project["submissions"] if s["url"] == root for p in s["prizes"]]
+
+
 async def get_winners(url: str, sponsor: str = "") -> dict:
-    """Winners of one hackathon with the prizes each won; `sponsor` filters on prize name text."""
+    """Winners of one hackathon with the prizes each won.
+
+    With `sponsor`, results are grouped by that sponsor's prize tracks: each track carries its
+    challenge brief (the prize description), how many projects entered it, and who won it. Only those
+    tracks are scanned, via the gallery's prize filter.
+    """
     root = _hackathon_root(url)
-    gallery = await list_hackathon_projects(root, winners_only=True, max_pages=10)
-    details = await asyncio.gather(*(get_project(p["url"]) for p in gallery["projects"]))
-    winners = []
-    for d in details:
-        prizes = [p for s in d["submissions"] if s["url"] == root for p in s["prizes"]]
-        if sponsor and not any(sponsor.lower() in p.lower() for p in prizes):
-            continue
-        winners.append({k: d[k] for k in ("name", "tagline", "url", "built_with")} | {"prizes": prizes})
-    return {"hackathon": root, "sponsor_filter": sponsor or None, "returned": len(winners), "winners": winners}
+    if not sponsor:
+        gallery = await list_hackathon_projects(root, winners_only=True, max_pages=10)
+        details = await asyncio.gather(*(get_project(p["url"]) for p in gallery["projects"]))
+        winners = [_winner(d, won) for d in details if (won := _prizes_won(d, root))]
+        return {"hackathon": root, "returned": len(winners), "winners": winners}
+
+    prizes, overview = await asyncio.gather(get_prizes(root), get_hackathon(root))
+    prizes = [p for p in prizes if _matches(sponsor, p["name"])]
+    briefs = {_norm(p["title"]): p["description"] for p in overview["prizes"]}
+    galleries = await asyncio.gather(*(list_hackathon_projects(root, winners_only=True, prize_id=p["id"]) for p in prizes))
+    urls = {proj["url"] for g in galleries for proj in g["projects"]}
+    details = {u: d for u, d in zip(urls, await asyncio.gather(*(get_project(u) for u in urls)))}
+    tracks = []
+    for prize, gallery in zip(prizes, galleries):
+        winners = [
+            _winner(d, won)
+            for proj in gallery["projects"]
+            if (d := details[proj["url"]]) and (won := [w for w in _prizes_won(d, root) if _norm(w) == _norm(prize["name"])])
+        ]
+        tracks.append(
+            {
+                "prize": prize["name"],
+                "challenge": briefs.get(_norm(prize["name"]), ""),
+                "entrants": gallery["total_submissions"],
+                "winners": winners,
+            }
+        )
+    return {"hackathon": root, "sponsor": sponsor, "tracks": tracks}
+
+
+async def find_sponsor_winners(
+    sponsor: str, query: str = "", order_by: str = "submission-date", max_hackathons: int = 25
+) -> dict:
+    """Winners of `sponsor`'s prize tracks across many judged hackathons, with each track's challenge.
+
+    Devpost has no sponsor index, so this pages through ended hackathons (newest first by default),
+    keeps the ones with winners announced, checks their prize tracks for the sponsor, and only digs
+    into the matches.
+    """
+    max_hackathons = max(1, min(max_hackathons, 60))
+    hackathons: list[dict] = []
+    page = 1
+    # ponytail: ~90% of fresh listings are unjudged, so this pages up to 40 deep; a prebuilt index removes the scan
+    while len(hackathons) < max_hackathons and page <= 40:
+        batch = await asyncio.gather(*(_list_ended(query, order_by, p) for p in range(page, page + 5)))
+        page += 5
+        listings = [h for b in batch for h in b]
+        if not listings:
+            break
+        seen = {h["url"] for h in hackathons}
+        hackathons += [h for h in listings if h["winners_announced"] and h["url"] not in seen]
+    hackathons = hackathons[:max_hackathons]
+    prize_lists = await asyncio.gather(*(get_prizes(h["url"]) for h in hackathons), return_exceptions=True)
+    matched = [
+        h for h, prizes in zip(hackathons, prize_lists)
+        if not isinstance(prizes, BaseException) and any(_matches(sponsor, p["name"]) for p in prizes)
+    ]
+    results = await asyncio.gather(*(get_winners(h["url"], sponsor) for h in matched))
+    return {
+        "sponsor": sponsor,
+        "hackathons_scanned": len(hackathons),
+        "hackathons_with_sponsor_prize": len(matched),
+        "results": [
+            {"hackathon": h["title"], "url": h["url"], "dates": h["dates"], "tracks": r["tracks"]}
+            for h, r in zip(matched, results)
+        ],
+    }

@@ -1,2 +1,4 @@
 def main() -> None:
-    print("Hello from devpost-mcp!")
+    from .server import mcp
+
+    mcp.run()
