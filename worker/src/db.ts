@@ -72,17 +72,68 @@ export async function searchHackathons(db: D1Database, f: HackathonFilters) {
 	return { returned: rows.length, offset: f.offset, hackathons: rows.map(hackathon) };
 }
 
+export type PrizeRow = { title: string; value: string | null; winners: string | null; description: string | null; entrants: number | null };
+const PRIZE_COLUMNS = "title, value, winners, description, entrants";
+
+/** "[Creao AI] 2nd Place Best AI-First Disruptor" -> "[Creao AI] Best AI-First Disruptor" */
+export function trackName(title: string): string {
+	return title
+		.replace(/\b(?:1st|2nd|3rd|\d+th|first|second|third)\s+place\b/gi, "")
+		.replace(/\(\s*\)/g, "")
+		.replace(/\s+/g, " ")
+		.replace(/\s+([:,])/g, "$1")
+		.replace(/[\s:\-–|,]+$/, "")
+		.trim();
+}
+
+const dollars = (s: string | null | undefined) => {
+	const m = s?.match(/\$\s?([\d,]+)/);
+	return m ? Number(m[1]!.replace(/,/g, "")) : null;
+};
+
+/** Devpost's listed value is whatever the organizer typed; flag it when the brief states a different cash amount. */
+export function cashInBrief(p: Pick<PrizeRow, "value" | "description">): string | null {
+	const stated = p.description?.match(/\$\s?[\d,]+(?=\s*(?:usd\s*)?(?:in\s+)?cash)/i)?.[0] ?? null;
+	return stated && dollars(stated) !== dollars(p.value) ? stated.replace(/\s/g, "") : null;
+}
+
+const slots = (winners: string | null) => parseInt(winners ?? "") || 1;
+
+/** One row per track: the 1st/2nd/3rd place prizes of a track share a brief, so they collapse together. */
+export function tracks(prizes: PrizeRow[]) {
+	const groups = new Map<string, PrizeRow[]>();
+	for (const p of prizes) groups.set(trackName(p.title), [...(groups.get(trackName(p.title)) ?? []), p]);
+	return [...groups].map(([track, ps]) => {
+		const winnerSlots = ps.reduce((s, p) => s + slots(p.winners), 0);
+		// each placement is its own opt-in prize on Devpost; teams usually tick all of a track's placements
+		const entrants = ps.some((p) => p.entrants !== null) ? Math.max(...ps.map((p) => p.entrants ?? 0)) : null;
+		return {
+			track,
+			prizes: ps.map((p) => {
+				const cash = cashInBrief(p);
+				return { title: p.title, value: p.value || null, ...(cash ? { cash_in_brief: cash } : {}) };
+			}),
+			winner_slots: winnerSlots,
+			entrants,
+			entrants_per_slot: entrants ? Math.round((10 * entrants) / winnerSlots) / 10 : null,
+			challenge: ps.find((p) => p.description)?.description ?? "",
+		};
+	});
+}
+
+export type Track = ReturnType<typeof tracks>[number];
+
 export async function getHackathon(db: D1Database, url: string) {
 	const root = hackathonRoot(url);
 	const [h] = await all(db, "SELECT * FROM hackathons WHERE url = ?", root);
 	if (!h) return null;
-	const prizes = await all(db, "SELECT title, value, winners, description FROM prizes WHERE hackathon_id = ? ORDER BY id", h.id);
+	const prizes = await all<PrizeRow>(db, `SELECT ${PRIZE_COLUMNS} FROM prizes WHERE hackathon_id = ? ORDER BY id`, h.id);
 	return {
 		...hackathon(h),
 		tagline: h.tagline,
 		description: h.description,
-		judging_criteria: json(h.judging_criteria) ?? [],
-		prizes,
+		judging_criteria: (json(h.judging_criteria) ?? []) as { criterion: string; description: string }[],
+		tracks: tracks(prizes),
 	};
 }
 
@@ -113,7 +164,8 @@ export async function listProjects(db: D1Database, url: string, winnersOnly: boo
 	};
 }
 
-type WinnerRow = { slug: string; name: string; tagline: string; built_with: string | null; prizes: string | null };
+type WinnerRow = { slug: string; name: string; tagline: string; built_with: string | null; prizes: string | null; description: string | null };
+const WINNER_COLUMNS = "p.slug, p.name, p.tagline, p.built_with, p.description, s.prizes";
 
 const winner = (r: WinnerRow, prizes: string[] | null) => ({
 	name: r.name,
@@ -129,7 +181,7 @@ export async function getWinners(db: D1Database, url: string, sponsor?: string) 
 	if (!h) return null;
 	const winners = await all<WinnerRow>(
 		db,
-		`SELECT p.slug, p.name, p.tagline, p.built_with, s.prizes FROM submissions s JOIN projects p ON p.slug = s.slug
+		`SELECT ${WINNER_COLUMNS} FROM submissions s JOIN projects p ON p.slug = s.slug
 		 WHERE s.hackathon_id = ? AND s.winner = 1 ORDER BY p.likes DESC`,
 		h.id,
 	);
@@ -139,23 +191,76 @@ export async function getWinners(db: D1Database, url: string, sponsor?: string) 
 	return { hackathon: h.title, url: root, dates: h.dates, sponsor, tracks: await sponsorTracks(db, h.id, sponsor, winners) };
 }
 
+/** "Fetch.ai" -> "Fetch": the part every spelling of a sponsor shares ("Fetch AI", "[Fetch.ai]"). */
+export function sponsorKey(sponsor: string): string {
+	return sponsor.split(/[\s.:[\]()]+/).find((w) => w.length >= 3) ?? sponsor;
+}
+
+/** The sponsor a track title names: "[Creao AI] ..." or "Fetch AI: ..."; null for "Best Overall". */
+export function titleSponsor(title: string): string | null {
+	return title.match(/^\[([^\]]+)\]/)?.[1] ?? title.match(/^([^:]{2,40}):/)?.[1] ?? null;
+}
+
+/** Sentences of a write-up that mention the sponsor: how the project actually used it. */
+export function mentions(text: string | null, sponsor: string): string[] {
+	const key = sponsorKey(sponsor).toLowerCase();
+	return (text ?? "")
+		.split(/(?<=[.!?])\s+|\n+/)
+		.filter((s) => s.toLowerCase().includes(key))
+		.slice(0, 3)
+		.map((s) => s.trim().slice(0, 300));
+}
+
 async function sponsorTracks(db: D1Database, hackathonId: number, sponsor: string, winners: WinnerRow[]) {
-	const prizes = await all<{ title: string; value: string; winners: string; description: string }>(
+	const prizes = await all<PrizeRow>(
 		db,
-		"SELECT title, value, winners, description FROM prizes WHERE hackathon_id = ? AND title LIKE ? ORDER BY id",
+		`SELECT ${PRIZE_COLUMNS} FROM prizes WHERE hackathon_id = ? AND title LIKE ? ORDER BY id`,
 		hackathonId,
 		`%${sponsor}%`,
 	);
 	const norm = (s: string) => s.toLowerCase().replace(/\W+/g, "");
-	return prizes.map((p) => ({
-		prize: p.title,
-		value: p.value,
-		winner_slots: p.winners,
-		challenge: p.description,
-		winners: winners
-			.filter((w) => (json(w.prizes) as string[] | null)?.some((won) => norm(won) === norm(p.title)))
-			.map((w) => winner(w, [p.title])),
+	return tracks(prizes).map((t) => ({
+		...t,
+		winners: winners.flatMap((w) => {
+			const won = (json(w.prizes) as string[] | null)?.filter((p) => t.prizes.some((prize) => norm(prize.title) === norm(p))) ?? [];
+			return won.length ? [{ ...winner(w, won), sponsor_usage: mentions(w.description, sponsor) }] : [];
+		}),
 	}));
+}
+
+const median = (xs: number[]) => {
+	const s = [...xs].sort((a, b) => a - b);
+	return s.length ? s[Math.floor(s.length / 2)]! : null;
+};
+
+/** What a sponsor has asked for and rewarded before, and how crowded its tracks were. */
+export async function sponsorProfile(db: D1Database, sponsor: string) {
+	const like = `%${sponsorKey(sponsor)}%`;
+	const [briefs, winners, past] = await Promise.all([
+		all<{ description: string }>(
+			db,
+			`SELECT p.description FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
+			 WHERE p.title LIKE ? AND length(p.description) > 80 GROUP BY p.description ORDER BY MAX(h.ends_on) DESC LIMIT 6`,
+			like,
+		),
+		all<{ name: string; tagline: string | null }>(
+			db,
+			`SELECT pr.name, pr.tagline FROM submissions s JOIN projects pr ON pr.slug = s.slug JOIN hackathons h ON h.id = s.hackathon_id
+			 WHERE s.winner = 1 AND s.prizes LIKE ? ORDER BY h.ends_on DESC LIMIT 20`,
+			like,
+		),
+		all<{ entrants: number; winners: string | null }>(
+			db,
+			`SELECT p.entrants, p.winners FROM prizes p JOIN hackathons h ON h.id = p.hackathon_id
+			 WHERE p.title LIKE ? AND p.entrants > 0 ORDER BY h.ends_on DESC LIMIT 20`,
+			like,
+		),
+	]);
+	return {
+		text: [...briefs.map((b) => b.description), ...winners.map((w) => `${w.name} ${w.tagline ?? ""}`)].join("\n"),
+		past_tracks_counted: past.length,
+		past_entrants_per_slot: median(past.map((p) => Math.round((10 * p.entrants) / slots(p.winners)) / 10)),
+	};
 }
 
 export async function findSponsorWinners(db: D1Database, sponsor: string, endedAfter: string | undefined, limit: number) {
@@ -170,14 +275,15 @@ export async function findSponsorWinners(db: D1Database, sponsor: string, endedA
 		hackathons.map(async (h) => {
 			const winners = await all<WinnerRow>(
 				db,
-				`SELECT p.slug, p.name, p.tagline, p.built_with, s.prizes FROM submissions s JOIN projects p ON p.slug = s.slug
+				`SELECT ${WINNER_COLUMNS} FROM submissions s JOIN projects p ON p.slug = s.slug
 				 WHERE s.hackathon_id = ? AND s.winner = 1`,
 				h.id,
 			);
 			return { hackathon: h.title, url: h.url, dates: h.dates, tracks: await sponsorTracks(db, h.id, sponsor, winners) };
 		}),
 	);
-	return { sponsor, hackathons_returned: results.length, results };
+	const perSlot = results.flatMap((r) => r.tracks.flatMap((t) => (t.entrants_per_slot ? [t.entrants_per_slot] : [])));
+	return { sponsor, hackathons_returned: results.length, median_entrants_per_slot: median(perSlot), results };
 }
 
 export type ProjectHit = {
@@ -188,6 +294,7 @@ export type ProjectHit = {
 	built_with: string | null;
 	winner: number;
 	hackathons: string | null;
+	last_ended: string | null;
 };
 
 export async function searchProjects(
@@ -216,7 +323,7 @@ export async function searchProjects(
 		   LEFT JOIN submissions s ON s.slug = p.slug LEFT JOIN hackathons h ON h.id = s.hackathon_id
 		   GROUP BY p.slug
 		 )
-		 SELECT slug, name, tagline, likes, built_with, winner, hackathons FROM x ORDER BY score LIMIT ?`,
+		 SELECT slug, name, tagline, likes, built_with, winner, hackathons, last_ended FROM x ORDER BY score LIMIT ?`,
 		...[match, ...(opts.endedAfter ? [opts.endedAfter] : []), opts.limit],
 	);
 }
@@ -229,6 +336,7 @@ export const projectHit = (p: ProjectHit) => ({
 	built_with: json(p.built_with),
 	likes: p.likes,
 	hackathons: p.hackathons?.split(" | ") ?? [],
+	last_ended: p.last_ended,
 });
 
 export async function getProject(db: D1Database, urlOrSlug: string) {
@@ -254,11 +362,21 @@ export async function getProject(db: D1Database, urlOrSlug: string) {
 	};
 }
 
+/** Share of indexed projects that won something: the baseline "proven space" is measured against. */
+export async function winnerBaseline(db: D1Database): Promise<number> {
+	const [r] = await all<{ rate: number }>(
+		db,
+		"SELECT (SELECT COUNT(DISTINCT slug) FROM submissions WHERE winner = 1) * 1.0 / (SELECT COUNT(*) FROM projects) AS rate",
+	);
+	return r?.rate ?? 0;
+}
+
 export async function indexInfo(db: D1Database) {
 	const [row] = await all(
 		db,
 		`SELECT (SELECT COUNT(*) FROM hackathons) AS hackathons, (SELECT COUNT(*) FROM projects) AS projects,
 		   (SELECT COUNT(*) FROM prizes) AS prize_tracks, (SELECT COUNT(*) FROM submissions WHERE winner = 1) AS winning_entries,
+		   (SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL) AS tracks_with_entrant_counts,
 		   (SELECT MAX(updated_at) FROM hackathons) AS last_updated`,
 	);
 	return row;
