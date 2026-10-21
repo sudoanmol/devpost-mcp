@@ -9,6 +9,8 @@ It has two parts:
 
 There's no scheduled crawling. You run the update yourself when you want fresher data.
 
+**Scope:** hackathons that ended on or after 2024-01-01 with at least 100 registrations, plus every open and upcoming hackathon. Registrations are the only size signal Devpost exposes, and the 100 cutoff keeps student and builder events while dropping classroom-sized ones. Both thresholds are `SINCE` and `MIN_REGISTRATIONS` in `src/devpost_mcp/crawl.py`. If you change them, the next `crawl` and `push` remove whatever falls out of scope, locally and in D1.
+
 ## Connect (teammates)
 
 You need the server URL and the team token from whoever runs the crawler. Then:

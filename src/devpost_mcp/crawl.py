@@ -29,6 +29,24 @@ DB = ROOT / "data" / "devpost.db"
 WRANGLER_CONFIG = ROOT / "worker" / "wrangler.jsonc"
 CONCURRENCY = 8  # ~10 req/s, which Devpost served without a single error in testing
 
+# Scope: judged hackathons from the AI era that drew a real crowd (registrations is the only size signal
+# Devpost exposes; 100+ keeps student and builder events and drops classroom-sized ones). Open and upcoming
+# hackathons are always kept, since they're the events people are brainstorming for.
+SINCE = "2024-01-01"
+MIN_REGISTRATIONS = 100
+OUT_OF_SCOPE = f"status = 'ended' AND (ends_on IS NULL OR ends_on < '{SINCE}' OR registrations < {MIN_REGISTRATIONS})"
+# runs locally after the listing and in D1 on every push, so both drop the same rows
+PRUNE = [
+    f"DELETE FROM prizes WHERE hackathon_id IN (SELECT id FROM hackathons WHERE {OUT_OF_SCOPE});",
+    f"DELETE FROM submissions WHERE hackathon_id IN (SELECT id FROM hackathons WHERE {OUT_OF_SCOPE});",
+    f"DELETE FROM hackathons WHERE {OUT_OF_SCOPE};",
+    "DELETE FROM projects WHERE slug NOT IN (SELECT slug FROM submissions);",
+]
+
+
+def in_scope(h: dict) -> bool:
+    return h["status"] != "ended" or (h["ends_on"] or "") >= SINCE and h["registrations"] >= MIN_REGISTRATIONS
+
 # local-only bookkeeping: what each hackathon looked like when we last fetched its pages
 LOCAL_STATE = """
 CREATE TABLE IF NOT EXISTS crawl_state (hackathon_id INTEGER PRIMARY KEY, page_status TEXT, gallery_winners INTEGER);
@@ -97,7 +115,7 @@ async def crawl_listing(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
 
         await run_all(f"listing {status}", list(range(2, math.ceil(total / 9) + 1)), page)
         ts = now()
-        for h in rows:
+        for h in filter(in_scope, rows):
             try:
                 conn.execute(
                     """INSERT INTO hackathons (id, url, title, organization, dates, ends_on, status, location, themes,
@@ -117,6 +135,15 @@ async def crawl_listing(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
             except sqlite3.IntegrityError:
                 pass  # two listings claiming one URL; keep the first
         conn.commit()
+    prune(conn)
+
+
+def prune(conn: sqlite3.Connection) -> None:
+    with conn:
+        for statement in PRUNE:
+            conn.execute(statement)
+        conn.execute("DELETE FROM crawl_state WHERE hackathon_id NOT IN (SELECT id FROM hackathons)")
+        conn.execute("DELETE FROM project_state WHERE slug NOT IN (SELECT slug FROM projects)")
 
 
 async def crawl_pages(c: httpx.AsyncClient, conn: sqlite3.Connection) -> None:
@@ -249,6 +276,7 @@ def upsert(table: str, row: tuple) -> str:
 
 
 def changed_statements(conn: sqlite3.Connection, since: str) -> Iterable[str]:
+    yield from PRUNE
     for table in ("hackathons", "projects", "submissions"):
         for row in conn.execute(f"SELECT {', '.join(COLUMNS[table])} FROM {table} WHERE updated_at > ?", (since,)):
             yield upsert(table, row)
@@ -330,4 +358,9 @@ def main() -> None:
 if __name__ == "__main__":
     assert sql_literal("it's") == "'it''s'" and sql_literal(None) == "NULL" and sql_literal(3) == "3"
     assert upsert("submissions", ("a", 1, 1, None, "t")).startswith("INSERT INTO submissions (slug, hackathon_id, winner, prizes, updated_at) VALUES ('a', 1, 1, NULL, 't') ON CONFLICT (slug, hackathon_id) DO UPDATE SET winner = excluded.winner")
+    assert in_scope({"status": "ended", "ends_on": "2024-03-01", "registrations": 100})
+    assert not in_scope({"status": "ended", "ends_on": "2023-12-31", "registrations": 5000})
+    assert not in_scope({"status": "ended", "ends_on": "2025-01-01", "registrations": 99})
+    assert not in_scope({"status": "ended", "ends_on": None, "registrations": 500})
+    assert in_scope({"status": "upcoming", "ends_on": "2026-12-01", "registrations": 3})
     print("ok")
