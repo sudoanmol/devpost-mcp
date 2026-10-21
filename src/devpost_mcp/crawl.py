@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -261,7 +262,8 @@ async def crawl(winners: bool) -> None:
         await crawl_entrants(c, conn)
         if winners:
             await crawl_winners(c, conn)
-    stats(conn)
+    conn.close()
+    stats()
 
 
 # --- push -----------------------------------------------------------------
@@ -288,11 +290,11 @@ def refresh_stats(conn: sqlite3.Connection) -> None:
 
 def push() -> None:
     """Upload a gzipped snapshot of the whole database; the server swaps it in atomically."""
-    conn = connect()
-    refresh_stats(conn)
     with tempfile.TemporaryDirectory() as tmp:
         snapshot, packed = Path(tmp) / "devpost.db", Path(tmp) / "devpost.db.gz"
-        conn.execute("VACUUM INTO ?", (str(snapshot),))  # consistent even while a crawl is writing
+        with closing(connect()) as conn:
+            refresh_stats(conn)
+            conn.execute("VACUUM INTO ?", (str(snapshot),))  # consistent even while a crawl is writing
         with snapshot.open("rb") as raw, gzip.open(packed, "wb", compresslevel=6) as gz:
             shutil.copyfileobj(raw, gz)
         print(f"push: uploading {packed.stat().st_size / 1e6:.0f} MB to {SERVER}", flush=True)
@@ -307,18 +309,18 @@ def push() -> None:
     print(f"push: done, server now holds {r.json()}")
 
 
-def stats(conn: sqlite3.Connection | None = None) -> None:
-    conn = conn or connect()
-    q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
-    print(
-        f"hackathons {q('SELECT COUNT(*) FROM hackathons')} "
-        f"(pages {q('SELECT COUNT(*) FROM crawl_state WHERE page_status IS NOT NULL')}, "
-        f"galleries {q('SELECT COUNT(*) FROM crawl_state WHERE gallery_winners IS NOT NULL')}) | "
-        f"prizes {q('SELECT COUNT(*) FROM prizes')} (entrants counted {q('SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL')}) | projects {q('SELECT COUNT(*) FROM projects')} | "
-        f"winning entries {q('SELECT COUNT(*) FROM submissions WHERE winner = 1')} "
-        f"(detailed {q('SELECT COUNT(*) FROM project_state')}) | "
-        f"db {DB.stat().st_size / 1e6:.0f} MB"
-    )
+def stats() -> None:
+    with closing(connect()) as conn:
+        q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+        print(
+            f"hackathons {q('SELECT COUNT(*) FROM hackathons')} "
+            f"(pages {q('SELECT COUNT(*) FROM crawl_state WHERE page_status IS NOT NULL')}, "
+            f"galleries {q('SELECT COUNT(*) FROM crawl_state WHERE gallery_winners IS NOT NULL')}) | "
+            f"prizes {q('SELECT COUNT(*) FROM prizes')} (entrants counted {q('SELECT COUNT(*) FROM prizes WHERE entrants IS NOT NULL')}) | projects {q('SELECT COUNT(*) FROM projects')} | "
+            f"winning entries {q('SELECT COUNT(*) FROM submissions WHERE winner = 1')} "
+            f"(detailed {q('SELECT COUNT(*) FROM project_state')}) | "
+            f"db {DB.stat().st_size / 1e6:.0f} MB"
+        )
 
 
 def main() -> None:
